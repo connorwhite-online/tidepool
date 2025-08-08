@@ -5,6 +5,11 @@
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>remote-notification</string>
+		<string>location</string>
 	</array>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Tidepool uses your location to show your own approximate presence ring and to render nearby interest heatmaps. We never share your precise location.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>Tidepool uses location in the background to update presence and heatmaps when you opt in. We never share your precise location.</string>
 </dict>
 </plist>

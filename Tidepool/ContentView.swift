@@ -6,81 +6,97 @@
 //
 
 import SwiftUI
-import CoreData
+import MapKit
+import UIKit
 
 struct ContentView: View {
-    @Environment(\.managedObjectContext) private var viewContext
-
-    @FetchRequest(
-        sortDescriptors: [NSSortDescriptor(keyPath: \Item.timestamp, ascending: true)],
-        animation: .default)
-    private var items: FetchedResults<Item>
+    @State private var selection: Int = 0
 
     var body: some View {
-        NavigationView {
-            List {
-                ForEach(items) { item in
-                    NavigationLink {
-                        Text("Item at \(item.timestamp!, formatter: itemFormatter)")
-                    } label: {
-                        Text(item.timestamp!, formatter: itemFormatter)
-                    }
-                }
-                .onDelete(perform: deleteItems)
+        ZStack(alignment: .bottom) {
+            Group {
+                if selection == 0 { MapHomeView() } else { ProfileView() }
             }
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    EditButton()
-                }
-                ToolbarItem {
-                    Button(action: addItem) {
-                        Label("Add Item", systemImage: "plus")
-                    }
-                }
-            }
-            Text("Select an item")
+            .ignoresSafeArea()
+
+            FloatingTabBar(selection: $selection)
+                .padding(.bottom, 20)
         }
+        .fontDesign(.rounded)
+    }
+}
+
+struct FloatingTabBar: View {
+    @Binding var selection: Int
+
+    private let iconSize: CGFloat = 24
+
+    var body: some View {
+        HStack(spacing: 28) {
+            tabButton(index: 0, systemName: "map.fill")
+            tabButton(index: 1, systemName: "person.circle.fill")
+        }
+        .padding(.horizontal, 22)
+        .padding(.vertical, 12)
+        .background(backgroundView)
+        .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .shadow(color: .black.opacity(0.1), radius: 12, x: 0, y: 8)
+        .overlay(
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.15), lineWidth: 1)
+        )
+        .frame(maxWidth: 260)
+        .frame(maxWidth: .infinity)
     }
 
-    private func addItem() {
-        withAnimation {
-            let newItem = Item(context: viewContext)
-            newItem.timestamp = Date()
-
-            do {
-                try viewContext.save()
-            } catch {
-                // Replace this implementation with code to handle the error appropriately.
-                // fatalError() causes the application to generate a crash log and terminate. You should not use this function in a shipping application, although it may be useful during development.
-                let nsError = error as NSError
-                fatalError("Unresolved error \(nsError), \(nsError.userInfo)")
+    @ViewBuilder
+    private func tabButton(index: Int, systemName: String) -> some View {
+        Button(action: { selection = index }) {
+            if selection == index {
+                RadialGradient(gradient: Gradient(colors: [Color(hex: "#9CE3A3")!, Color(hex: "#A6E4F8")!]), center: .center, startRadius: 0, endRadius: 16)
+                    .mask(
+                        Image(systemName: systemName)
+                            .resizable()
+                            .scaledToFit()
+                    )
+                    .frame(width: iconSize, height: iconSize)
+            } else {
+                Image(systemName: systemName)
+                    .resizable()
+                    .scaledToFit()
+                    .foregroundStyle(.secondary)
+                    .frame(width: iconSize, height: iconSize)
             }
         }
+        .buttonStyle(.plain)
+        .contentShape(Rectangle())
+        .frame(width: 44, height: 44)
     }
 
-    private func deleteItems(offsets: IndexSet) {
-        withAnimation {
-            offsets.map { items[$0] }.forEach(viewContext.delete)
-
-            do {
-                try viewContext.save()
-            } catch {
-                // Replace this implementation with code to handle the error appropriately.
-                // fatalError() causes the application to generate a crash log and terminate. You should not use this function in a shipping application, although it may be useful during development.
-                let nsError = error as NSError
-                fatalError("Unresolved error \(nsError), \(nsError.userInfo)")
-            }
+    private var backgroundView: some View {
+        ZStack {
+            // Blur/translucency
+            VisualEffectBlur(blurStyle: .systemThinMaterialDark)
+                .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+            // Subtle vertical gradient (darker bottom to lighter top)
+            LinearGradient(
+                colors: [Color.black.opacity(0.18), Color.white.opacity(0.08)],
+                startPoint: .bottom,
+                endPoint: .top
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
         }
     }
 }
 
-private let itemFormatter: DateFormatter = {
-    let formatter = DateFormatter()
-    formatter.dateStyle = .short
-    formatter.timeStyle = .medium
-    return formatter
-}()
+struct VisualEffectBlur: UIViewRepresentable {
+    var blurStyle: UIBlurEffect.Style
+    func makeUIView(context: Context) -> UIVisualEffectView {
+        UIVisualEffectView(effect: UIBlurEffect(style: blurStyle))
+    }
+    func updateUIView(_ uiView: UIVisualEffectView, context: Context) {}
+}
 
 #Preview {
-    ContentView().environment(\.managedObjectContext, PersistenceController.preview.container.viewContext)
+    ContentView()
 }
