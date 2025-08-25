@@ -17,6 +17,7 @@ final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelega
         manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
         manager.distanceFilter = 50
         manager.activityType = .other
+        manager.pausesLocationUpdatesAutomatically = true
         loadHome()
     }
 
@@ -29,6 +30,30 @@ final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelega
         default:
             break
         }
+    }
+
+    func requestAlwaysAuthorization() {
+        // Only meaningful after When-In-Use has been granted
+        manager.requestAlwaysAuthorization()
+    }
+
+    func setBackgroundUpdatesEnabled(_ enabled: Bool) {
+        manager.allowsBackgroundLocationUpdates = enabled
+        manager.pausesLocationUpdatesAutomatically = true
+        if enabled {
+            if manager.authorizationStatus == .authorizedAlways {
+                manager.startMonitoringSignificantLocationChanges()
+                manager.startMonitoringVisits()
+            }
+        } else {
+            manager.stopMonitoringSignificantLocationChanges()
+            manager.stopMonitoringVisits()
+        }
+    }
+
+    func applyReducedAccuracy(_ reduced: Bool) {
+        manager.desiredAccuracy = reduced ? kCLLocationAccuracyHundredMeters : kCLLocationAccuracyBest
+        manager.distanceFilter = reduced ? 50 : 10
     }
 
     func setHome(to coordinate: CLLocationCoordinate2D) {
@@ -59,5 +84,11 @@ final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelega
 
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
         latestLocation = locations.last
+    }
+
+    func locationManager(_ manager: CLLocationManager, didVisit visit: CLVisit) {
+        // Update latest location on visit events as a coarse signal
+        let coord = visit.coordinate
+        latestLocation = CLLocation(latitude: coord.latitude, longitude: coord.longitude)
     }
 } 

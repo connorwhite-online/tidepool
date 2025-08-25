@@ -11,6 +11,8 @@ import UIKit
 
 struct ContentView: View {
     @State private var selection: Int = 0
+    @AppStorage("has_onboarded") private var hasOnboarded: Bool = false
+    @State private var showOnboarding: Bool = false
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -23,11 +25,19 @@ struct ContentView: View {
                 .padding(.bottom, 20)
         }
         .fontDesign(.rounded)
+        .onAppear { showOnboarding = !hasOnboarded }
+        .onChange(of: hasOnboarded) { _, newValue in
+            showOnboarding = !newValue
+        }
+        .fullScreenCover(isPresented: $showOnboarding) {
+            OnboardingView()
+        }
     }
 }
 
 struct FloatingTabBar: View {
     @Binding var selection: Int
+    @Environment(\.colorScheme) private var colorScheme
 
     private let iconSize: CGFloat = 24
 
@@ -40,10 +50,10 @@ struct FloatingTabBar: View {
         .padding(.vertical, 12)
         .background(backgroundView)
         .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
-        .shadow(color: .black.opacity(0.1), radius: 12, x: 0, y: 8)
+        .shadow(color: .black.opacity(colorScheme == .dark ? 0.1 : 0.06), radius: 12, x: 0, y: 8)
         .overlay(
             RoundedRectangle(cornerRadius: 28, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.15), lineWidth: 1)
+                .strokeBorder((colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.08)), lineWidth: 1)
         )
         .frame(maxWidth: 260)
         .frame(maxWidth: .infinity)
@@ -75,12 +85,14 @@ struct FloatingTabBar: View {
 
     private var backgroundView: some View {
         ZStack {
-            // Blur/translucency
-            VisualEffectBlur(blurStyle: .systemThinMaterialDark)
+            // Blur/translucency adaptive to color scheme
+            VisualEffectBlur(blurStyle: colorScheme == .dark ? .systemMaterialDark : .systemThinMaterialLight)
                 .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
-            // Subtle vertical gradient (darker bottom to lighter top)
+            // Subtle vertical gradient (tuned per scheme)
             LinearGradient(
-                colors: [Color.black.opacity(0.18), Color.white.opacity(0.08)],
+                colors: colorScheme == .dark
+                ? [Color.black.opacity(0.28), Color.black.opacity(0.16)]
+                : [Color.black.opacity(0.06), Color.white.opacity(0.10)],
                 startPoint: .bottom,
                 endPoint: .top
             )

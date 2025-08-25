@@ -11,5 +11,9 @@
 	<string>Tidepool uses your location to show your own approximate presence ring and to render nearby interest heatmaps. We never share your precise location.</string>
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
 	<string>Tidepool uses location in the background to update presence and heatmaps when you opt in. We never share your precise location.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Tidepool may use your photos’ location tags (if you opt in) to infer place categories and improve interest heatmaps. Photos themselves never leave your device.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Tidepool may save images only for features you explicitly use (like exports). No photos are uploaded without your consent.</string>
 </dict>
 </plist>

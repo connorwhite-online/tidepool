@@ -13,18 +13,50 @@ struct MapHomeView: View {
     @State private var presenceOverlays: [PresenceCircleOverlay] = []
     @State private var heatOverlays: [HeatCircleOverlay] = []
     @State private var heatBlobGroups: [HeatBlobGroup] = []
+    @State private var poiAnnotations: [POIAnnotation] = []
     @State private var mockSpotsLoaded: Bool = false
+    // Hysteresis thresholds to prevent rapid toggling near boundary
+    private let homeHideInnerRadiusMeters: CLLocationDistance = 137.16 // 450 ft
+    private let homeShowOuterRadiusMeters: CLLocationDistance = 167.64 // 550 ft
+    @State private var isPresenceVisible: Bool = false
 
     private let homeHideRadiusMeters: CLLocationDistance = 152.4 // 500 ft
     private let presenceRadiusMeters: CLLocationDistance = 30.48  // 100 ft
 
+    @State private var currentTileIdDescription: String = "—"
+    @State private var showTileHUD: Bool = false
+    private let presenceReporter = PresenceReporter()
+
     private var mapView: some View {
-        MapViewRepresentable(
-            presenceOverlays: presenceOverlays,
-            heatOverlays: heatOverlays,
-            heatBlobGroups: heatBlobGroups
-        )
-        .ignoresSafeArea(edges: .top)
+        ZStack(alignment: .center) {
+            MapViewRepresentable(
+                presenceOverlays: presenceOverlays,
+                heatOverlays: heatOverlays,
+                heatBlobGroups: heatBlobGroups,
+                highContrast: true,
+                poiAnnotations: poiAnnotations
+            )
+            .ignoresSafeArea()
+
+            if heatBlobGroups.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "map")
+                        .font(.largeTitle)
+                        .foregroundStyle(.secondary)
+                    Text("Explore hotspots nearby")
+                        .foregroundStyle(.secondary)
+                }
+                .padding(12)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
+        }
+        .overlay(alignment: .bottomTrailing) {
+            if showTileHUD {
+                debugTileIdHUD
+                    .padding(.trailing, 16)
+                    .padding(.bottom, 100)
+            }
+        }
     }
 
     var body: some View {
@@ -36,30 +68,126 @@ struct MapHomeView: View {
                         loadMockHeatSpots()
                         mockSpotsLoaded = true
                     }
+                    updatePresenceOverlay()
+                    updateTileId()
+                    presenceReporter.start(using: location)
+                }
+                .onDisappear {
+                    presenceReporter.stop()
                 }
                 .onChange(of: location.latestLocation) { _, _ in
                     updatePresenceOverlay()
+                    updateTileId()
+                }
+                .onChange(of: heatBlobGroups) { _, _ in
+                    refreshPOIs()
                 }
                 .toolbar(.hidden, for: .navigationBar)
         }
     }
 
+    private var debugTileIdHUD: some View {
+        Text("Tile: \(currentTileIdDescription)")
+            .font(.footnote)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(.ultraThinMaterial, in: Capsule())
+    }
+
+    private func updateTileId() {
+        if let coord = location.latestLocation?.coordinate {
+            currentTileIdDescription = Tiling.current.tileIdString(for: coord)
+        } else {
+            currentTileIdDescription = "—"
+        }
+    }
+
     private func updatePresenceOverlay(force: Bool = false) {
         guard let userLoc = location.latestLocation else { return }
-        var shouldShow = false
+        var newVisible: Bool
         if let home = location.homeLocation {
             let homeCL = CLLocation(latitude: home.latitude, longitude: home.longitude)
             let distance = userLoc.distance(from: homeCL)
-            shouldShow = distance >= homeHideRadiusMeters
+            if force {
+                newVisible = distance >= homeHideRadiusMeters
+            } else if isPresenceVisible {
+                // Once visible, hide only when well inside inner threshold
+                newVisible = distance >= homeHideInnerRadiusMeters
+            } else {
+                // Once hidden, show only when well outside outer threshold
+                newVisible = distance >= homeShowOuterRadiusMeters
+            }
         } else {
-            shouldShow = true
+            newVisible = true
         }
 
-        if shouldShow || force {
+        isPresenceVisible = newVisible
+        if newVisible {
             presenceOverlays = [PresenceCircleOverlay(coordinate: userLoc.coordinate, radiusMeters: presenceRadiusMeters)]
         } else {
             presenceOverlays = []
         }
+    }
+
+    // MARK: - POIs filtered to heat
+
+    private func refreshPOIs() {
+        guard let center = location.latestLocation?.coordinate else { return }
+        let span = MKCoordinateSpan(latitudeDelta: 0.08, longitudeDelta: 0.08)
+        let region = MKCoordinateRegion(center: center, span: span)
+        if #available(iOS 13.0, *) {
+            let categories: [MKPointOfInterestCategory] = [.cafe, .restaurant, .nightlife, .park, .store, .museum]
+            let request = MKLocalPointsOfInterestRequest(coordinateRegion: region)
+            request.pointOfInterestFilter = MKPointOfInterestFilter(including: categories)
+            let search = MKLocalSearch(request: request)
+            search.start { response, _ in
+                let items = response?.mapItems ?? []
+                let filtered = items.filter { item in
+                    guard let coord = item.placemark.location?.coordinate else { return false }
+                    return isCoordinateInsideAnyHeat(coord)
+                }
+                let annotations: [POIAnnotation] = filtered.map { mi in
+                    POIAnnotation(
+                        coordinate: mi.placemark.coordinate,
+                        title: mi.name,
+                        subtitle: mi.pointOfInterestCategory?.rawValue
+                    )
+                }
+                DispatchQueue.main.async {
+                    self.poiAnnotations = annotations
+                }
+            }
+        }
+    }
+
+    private func isCoordinateInsideAnyHeat(_ coord: CLLocationCoordinate2D) -> Bool {
+        // Approximate: within any blob group's stroked hull radius envelope
+        for group in heatBlobGroups {
+            guard let first = group.points.first else { continue }
+            // Use distance to each point within group allowing per-user radius + a small blend
+            for p in group.points {
+                let d = distanceMeters(coord, p)
+                if d <= group.perUserRadiusMeters * 1.2 { return true }
+            }
+            // Fallback: within 80 m of group centroid
+            let centroid = centroidOf(group.points)
+            if distanceMeters(coord, centroid) <= max(80, group.perUserRadiusMeters) { return true }
+            _ = first // silence unused warning if needed
+        }
+        return false
+    }
+
+    private func centroidOf(_ coords: [CLLocationCoordinate2D]) -> CLLocationCoordinate2D {
+        var sx: Double = 0, sy: Double = 0
+        for c in coords { sx += c.latitude; sy += c.longitude }
+        let n = Double(max(coords.count, 1))
+        return CLLocationCoordinate2D(latitude: sx / n, longitude: sy / n)
+    }
+
+    private func distanceMeters(_ a: CLLocationCoordinate2D, _ b: CLLocationCoordinate2D) -> CLLocationDistance {
+        let la = CLLocation(latitude: a.latitude, longitude: a.longitude)
+        let lb = CLLocation(latitude: b.latitude, longitude: b.longitude)
+        return la.distance(from: lb)
     }
 
     // MARK: - Mock Heat Spots (Search -> Geocode -> Hardcoded fallback)
@@ -142,6 +270,7 @@ struct MapHomeView: View {
         group.notify(queue: .main) {
             heatBlobGroups = groups
             heatOverlays = [] // no per-point circles needed when using blob
+            refreshPOIs()
         }
     }
 

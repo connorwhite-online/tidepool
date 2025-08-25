@@ -1,5 +1,6 @@
 import SwiftUI
 import MapKit
+import UIKit
 
 struct HeatCircleOverlay {
     let coordinate: CLLocationCoordinate2D
@@ -7,10 +8,32 @@ struct HeatCircleOverlay {
     let intensity: CGFloat // 0...1
 }
 
-struct HeatBlobGroup {
+struct HeatBlobGroup: Equatable {
     let points: [CLLocationCoordinate2D]
     let baseIntensity: CGFloat
     let perUserRadiusMeters: CLLocationDistance
+    
+    static func == (lhs: HeatBlobGroup, rhs: HeatBlobGroup) -> Bool {
+        return lhs.points.count == rhs.points.count &&
+               lhs.baseIntensity == rhs.baseIntensity &&
+               lhs.perUserRadiusMeters == rhs.perUserRadiusMeters &&
+               zip(lhs.points, rhs.points).allSatisfy { 
+                   abs($0.latitude - $1.latitude) < 1e-10 && 
+                   abs($0.longitude - $1.longitude) < 1e-10 
+               }
+    }
+}
+
+final class POIAnnotation: NSObject, MKAnnotation {
+    let coordinate: CLLocationCoordinate2D
+    let title: String?
+    let subtitle: String?
+    init(coordinate: CLLocationCoordinate2D, title: String?, subtitle: String?) {
+        self.coordinate = coordinate
+        self.title = title
+        self.subtitle = subtitle
+        super.init()
+    }
 }
 
 private extension UIColor {
@@ -64,9 +87,18 @@ final class HeatBlobOverlay: NSObject, MKOverlay {
 final class HeatBlobRenderer: MKOverlayRenderer {
     private let innerColor = UIColor(hex: "#9CE3A3") ?? .systemGreen
     private let outerColor = UIColor(hex: "#A6E4F8") ?? .systemTeal
+    private let highContrast: Bool
+
+    init(overlay: MKOverlay, highContrast: Bool) {
+        self.highContrast = highContrast
+        super.init(overlay: overlay)
+    }
 
     override func draw(_ mapRect: MKMapRect, zoomScale: MKZoomScale, in context: CGContext) {
         guard let overlay = overlay as? HeatBlobOverlay else { return }
+
+        // Detect appearance (light/dark) to tune alpha for visibility
+        let isLightMode: Bool = UIScreen.main.traitCollection.userInterfaceStyle == .light
 
         for group in overlay.groups {
             guard !group.points.isEmpty else { continue }
@@ -113,18 +145,20 @@ final class HeatBlobRenderer: MKOverlayRenderer {
             context.replacePathWithStrokedPath()
             context.clip()
 
-            // Soft radial gradient from centroid outward to the max extent
+            // Soft radial gradient; higher alpha in high-contrast for visibility
+            let alphaBoost: CGFloat = isLightMode ? 0.12 : 0.0
+            let contrastBoost: CGFloat = highContrast ? 0.22 : 0.0
+            let innerAlpha: CGFloat = 0.24 + 0.45 * group.baseIntensity + alphaBoost + contrastBoost
+            let midAlpha: CGFloat = 0.12 + 0.22 * group.baseIntensity + alphaBoost / 2 + contrastBoost / 2
+            let outerAlpha: CGFloat = (isLightMode ? 0.10 : 0.05) + (highContrast ? 0.05 : 0.0)
+
             let maxDist: CGFloat = hull.map { hypot($0.x - centroid.x, $0.y - centroid.y) }.max() ?? radiusPx
             let endRadius = maxDist + radiusPx
 
-            let innerAlpha: CGFloat = 0.22 + 0.45 * group.baseIntensity
-            let midAlpha: CGFloat = 0.10 + 0.20 * group.baseIntensity
-            let outerAlpha: CGFloat = 0.02 + 0.05 * group.baseIntensity
-
             let colors = [
-                innerColor.withAlphaComponent(innerAlpha).cgColor,
-                innerColor.withAlphaComponent(midAlpha).cgColor,
-                outerColor.withAlphaComponent(outerAlpha).cgColor
+                innerColor.withAlphaComponent(min(1.0, innerAlpha)).cgColor,
+                innerColor.withAlphaComponent(min(1.0, midAlpha)).cgColor,
+                outerColor.withAlphaComponent(min(1.0, outerAlpha)).cgColor
             ] as CFArray
             let locations: [CGFloat] = [0.0, 0.55, 1.0]
             let colorSpace = CGColorSpaceCreateDeviceRGB()
@@ -168,10 +202,12 @@ final class HeatCircleRenderer: MKOverlayRenderer {
     private let intensity: CGFloat
     private let innerColor = UIColor(hex: "#9CE3A3") ?? .systemGreen
     private let outerColor = UIColor(hex: "#A6E4F8") ?? .systemTeal
+    private let highContrast: Bool
 
-    init(circle: MKCircle, intensity: CGFloat) {
+    init(circle: MKCircle, intensity: CGFloat, highContrast: Bool) {
         self.circle = circle
         self.intensity = max(0, min(intensity, 1))
+        self.highContrast = highContrast
         super.init(overlay: circle)
     }
 
@@ -186,25 +222,24 @@ final class HeatCircleRenderer: MKOverlayRenderer {
         guard radiusPx > 1 else { return }
 
         context.saveGState()
-
-        // Use additive compositing to help overlaps glow and blend
         context.setBlendMode(.plusLighter)
 
-        // Clip to circle path
         let circlePath = CGMutablePath()
         circlePath.addEllipse(in: CGRect(x: centerPt.x - radiusPx, y: centerPt.y - radiusPx, width: radiusPx * 2, height: radiusPx * 2))
         context.addPath(circlePath)
         context.clip()
 
-        // Soft gradient from center to edge, very low edge alpha to hide seams
-        let innerAlpha: CGFloat = 0.28 + 0.42 * intensity
-        let midAlpha: CGFloat = 0.12 + 0.22 * intensity
-        let outerAlpha: CGFloat = 0.02 + 0.06 * intensity
+        // Increase alpha in high-contrast/light mode for better visibility
+        let isLightMode = UIScreen.main.traitCollection.userInterfaceStyle == .light
+        let alphaBoost: CGFloat = (isLightMode ? 0.12 : 0.0) + (highContrast ? 0.22 : 0.0)
+        let innerAlpha: CGFloat = 0.28 + 0.42 * intensity + alphaBoost
+        let midAlpha: CGFloat = 0.12 + 0.22 * intensity + alphaBoost / 2
+        let outerAlpha: CGFloat = (isLightMode ? 0.10 : 0.05) + (highContrast ? 0.05 : 0.0)
 
         let colors = [
-            innerColor.withAlphaComponent(innerAlpha).cgColor,
-            innerColor.withAlphaComponent(midAlpha).cgColor,
-            outerColor.withAlphaComponent(outerAlpha).cgColor
+            innerColor.withAlphaComponent(min(1.0, innerAlpha)).cgColor,
+            innerColor.withAlphaComponent(min(1.0, midAlpha)).cgColor,
+            outerColor.withAlphaComponent(min(1.0, outerAlpha)).cgColor
         ] as CFArray
         let locations: [CGFloat] = [0.0, 0.55, 1.0]
         let colorSpace = CGColorSpaceCreateDeviceRGB()
@@ -218,9 +253,6 @@ final class HeatCircleRenderer: MKOverlayRenderer {
         }
 
         context.restoreGState()
-
-        // Remove visible border to avoid outlines where circles meet
-        // (no stroke)
     }
 }
 
@@ -228,6 +260,8 @@ struct MapViewRepresentable: UIViewRepresentable {
     let presenceOverlays: [PresenceCircleOverlay]
     let heatOverlays: [HeatCircleOverlay]
     let heatBlobGroups: [HeatBlobGroup]
+    let highContrast: Bool
+    let poiAnnotations: [POIAnnotation]
 
     func makeUIView(context: Context) -> MKMapView {
         let mapView = MKMapView(frame: .zero)
@@ -237,6 +271,14 @@ struct MapViewRepresentable: UIViewRepresentable {
         mapView.isRotateEnabled = true
         mapView.isPitchEnabled = true
         mapView.isZoomEnabled = true
+        if #available(iOS 16.0, *) {
+            let cfg = MKStandardMapConfiguration(elevationStyle: .flat, emphasisStyle: .muted)
+            mapView.preferredConfiguration = cfg
+        }
+        // Hide built-in Apple POIs; we'll add filtered ones manually
+        if #available(iOS 13.0, *) {
+            mapView.pointOfInterestFilter = .excludingAll
+        }
         return mapView
     }
 
@@ -260,53 +302,33 @@ struct MapViewRepresentable: UIViewRepresentable {
             mapView.addOverlay(circle)
         }
 
-        context.coordinator.setInitialViewportIfNeeded(mapView: mapView)
+        // Update POI annotations
+        let existing = mapView.annotations.compactMap { $0 as? POIAnnotation }
+        mapView.removeAnnotations(existing)
+        mapView.addAnnotations(poiAnnotations)
+
+        // Do not override camera/region; keep following the user location
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator()
+        Coordinator(getHighContrast: { self.highContrast })
     }
 
     final class Coordinator: NSObject, MKMapViewDelegate {
-        private var didSetInitialRegion = false
-
-        func setInitialViewportIfNeeded(mapView: MKMapView) {
-            guard !didSetInitialRegion else { return }
-
-            let circles = mapView.overlays.compactMap { $0 as? MKCircle }
-            let blobs = mapView.overlays.compactMap { $0 as? HeatBlobOverlay }
-            if let blob = blobs.first {
-                // Fit blob bounding rect
-                let edgePadding = UIEdgeInsets(top: 60, left: 40, bottom: 80, right: 40)
-                mapView.setVisibleMapRect(blob.boundingMapRect, edgePadding: edgePadding, animated: false)
-                didSetInitialRegion = true
-                return
-            }
-
-            guard !circles.isEmpty else { return }
-
-            // Prefer fitting heat overlays if present; otherwise fit whatever overlays exist
-            let heatCircles = circles.filter { ($0.title ?? "").hasPrefix("heat:") }
-            let targetCircles = heatCircles.isEmpty ? circles : heatCircles
-
-            var unionRect = MKMapRect.null
-            for c in targetCircles { unionRect = unionRect.union(c.boundingMapRect) }
-            if !unionRect.isNull {
-                let edgePadding = UIEdgeInsets(top: 60, left: 40, bottom: 80, right: 40)
-                mapView.setVisibleMapRect(unionRect, edgePadding: edgePadding, animated: false)
-                didSetInitialRegion = true
-            }
+        private let getHighContrast: () -> Bool
+        init(getHighContrast: @escaping () -> Bool) {
+            self.getHighContrast = getHighContrast
         }
 
         func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
             if overlay is HeatBlobOverlay {
-                return HeatBlobRenderer(overlay: overlay)
+                return HeatBlobRenderer(overlay: overlay, highContrast: getHighContrast())
             }
             if let circle = overlay as? MKCircle {
                 if let title = circle.title, title.hasPrefix("heat:") {
                     let parts = title.split(separator: ":")
                     let intensity = parts.count == 2 ? CGFloat(Double(parts[1]) ?? 0.0) : 0.0
-                    return HeatCircleRenderer(circle: circle, intensity: intensity)
+                    return HeatCircleRenderer(circle: circle, intensity: intensity, highContrast: getHighContrast())
                 } else {
                     let renderer = MKCircleRenderer(circle: circle)
                     renderer.fillColor = UIColor.systemBlue.withAlphaComponent(0.18)
@@ -316,6 +338,21 @@ struct MapViewRepresentable: UIViewRepresentable {
                 }
             }
             return MKOverlayRenderer(overlay: overlay)
+        }
+
+        func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
+            guard annotation is POIAnnotation else { return nil }
+            let identifier = "POIMarker"
+            var view = mapView.dequeueReusableAnnotationView(withIdentifier: identifier) as? MKMarkerAnnotationView
+            if view == nil {
+                view = MKMarkerAnnotationView(annotation: annotation, reuseIdentifier: identifier)
+                view?.canShowCallout = true
+                view?.glyphImage = UIImage(systemName: "mappin.circle.fill")
+                view?.markerTintColor = UIColor(hex: "#7BC9FF") ?? .systemTeal
+            } else {
+                view?.annotation = annotation
+            }
+            return view
         }
     }
 } 
