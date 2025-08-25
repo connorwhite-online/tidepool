@@ -268,8 +268,9 @@ An anti-social social map that anonymously visualizes where people with similar 
 ## Spatial Tiling & Rendering
 
 ### Tiling
-- Use H3 resolution r ≈ 8–10 (≈ 100–150 m). Round device location to tile_id
+- Use native Swift grid tiling at 150m resolution (≈ 100–150 m target). Round device location to tile_id
 - Client computes tile_id locally and sends only tile_id + noisy timestamp
+- **Implementation Note**: Native `SimpleGridTiler` chosen over H3 for zero dependencies, simpler privacy auditing, and reduced complexity
 
 ### Rendering Strategy
 - Option A (server tiles): pre-render PNG heat tiles per zoom; simple client
@@ -358,7 +359,7 @@ GET /v1/favorites
 - [x] SwiftUI `TabView` with Map/Profile
 - [x] Location permissions + Home picker UI
 - [x] Local 500 ft geofence logic with hysteresis
-- [ ] H3 tiling client lib integration or S2 alternative
+- [x] Native tiling system (implemented `SimpleGridTiler` - 150m grid, zero dependencies)
 - [x] Custom heat overlay renderer with stubbed data
 - [x] Info.plist strings + Privacy Manifest reasons 
 
@@ -535,7 +536,7 @@ GET /v1/favorites
 Constraints: All integrations must produce abstracted tags or embeddings, never identities or friend graphs. Data use must adhere to provider terms and in-app disclosures.
 
 ## Technical Notes & References
-- Spatial index: H3 (Uber) recommended for hex tiling and neighborhood ops
+- Spatial index: Native grid tiling system (150m square tiles) for simplicity and zero dependencies
 - iOS: MapKit `MKTileOverlay`, `MKOverlayRenderer`, `CLLocationManager`, `PHPhotoLibrary`
 - Similarity: cosine; consider dimensionality N≈256 for future embeddings
 
@@ -543,7 +544,7 @@ Constraints: All integrations must produce abstracted tags or embeddings, never 
 - [x] SwiftUI `TabView` with Map/Profile
 - [x] Location permissions + Home picker UI
 - [x] Local 500 ft geofence logic with hysteresis
-- [ ] H3 tiling client lib integration or S2 alternative
+- [x] Native tiling system (implemented `SimpleGridTiler` - 150m grid, zero dependencies)
 - [x] Custom heat overlay renderer with stubbed data
 - [x] Info.plist strings + Privacy Manifest reasons 
 - [x] High-contrast heatmap option
