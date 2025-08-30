@@ -13,7 +13,7 @@ struct MapHomeView: View {
     @State private var presenceOverlays: [PresenceCircleOverlay] = []
     @State private var heatOverlays: [HeatCircleOverlay] = []
     @State private var heatBlobGroups: [HeatBlobGroup] = []
-    @State private var poiAnnotations: [POIAnnotation] = []
+    // POI annotations are now handled natively by MapKit
     @State private var mockSpotsLoaded: Bool = false
     // Hysteresis thresholds to prevent rapid toggling near boundary
     private let homeHideInnerRadiusMeters: CLLocationDistance = 137.16 // 450 ft
@@ -26,6 +26,12 @@ struct MapHomeView: View {
     @State private var currentTileIdDescription: String = "—"
     @State private var showTileHUD: Bool = false
     private let presenceReporter = PresenceReporter()
+    
+    // Location detail sheet
+    @State private var showingLocationDetail = false
+    @State private var selectedLocationDetail: LocationDetail?
+    @State private var detailSheetOriginPoint: CGPoint = .zero
+    @StateObject private var favoritesManager = InAppFavoritesManager()
 
     private var mapView: some View {
         ZStack(alignment: .center) {
@@ -34,7 +40,10 @@ struct MapHomeView: View {
                 heatOverlays: heatOverlays,
                 heatBlobGroups: heatBlobGroups,
                 highContrast: true,
-                poiAnnotations: poiAnnotations
+                poiAnnotations: [], // No longer using custom POI annotations
+                onAnnotationTap: { annotation, tapPoint in
+                    handleAnnotationTap(annotation: annotation, tapPoint: tapPoint)
+                }
             )
             .ignoresSafeArea()
 
@@ -70,6 +79,7 @@ struct MapHomeView: View {
                     }
                     updatePresenceOverlay()
                     updateTileId()
+                    // POIs are now handled natively by MapKit
                     presenceReporter.start(using: location)
                 }
                 .onDisappear {
@@ -78,11 +88,22 @@ struct MapHomeView: View {
                 .onChange(of: location.latestLocation) { _, _ in
                     updatePresenceOverlay()
                     updateTileId()
+                    // POIs are now handled natively by MapKit
                 }
                 .onChange(of: heatBlobGroups) { _, _ in
-                    refreshPOIs()
+                    // Heat blobs updated - no need to refresh POIs as they're native
                 }
                 .toolbar(.hidden, for: .navigationBar)
+                .sheet(isPresented: $showingLocationDetail) {
+                    if let locationDetail = selectedLocationDetail {
+                        LocationDetailSheet(
+                            location: locationDetail,
+                            originPoint: detailSheetOriginPoint,
+                            isPresented: $showingLocationDetail,
+                            favoritesManager: favoritesManager
+                        )
+                    }
+                }
         }
     }
 
@@ -129,36 +150,7 @@ struct MapHomeView: View {
         }
     }
 
-    // MARK: - POIs filtered to heat
-
-    private func refreshPOIs() {
-        guard let center = location.latestLocation?.coordinate else { return }
-        let span = MKCoordinateSpan(latitudeDelta: 0.08, longitudeDelta: 0.08)
-        let region = MKCoordinateRegion(center: center, span: span)
-        if #available(iOS 13.0, *) {
-            let categories: [MKPointOfInterestCategory] = [.cafe, .restaurant, .nightlife, .park, .store, .museum]
-            let request = MKLocalPointsOfInterestRequest(coordinateRegion: region)
-            request.pointOfInterestFilter = MKPointOfInterestFilter(including: categories)
-            let search = MKLocalSearch(request: request)
-            search.start { response, _ in
-                let items = response?.mapItems ?? []
-                let filtered = items.filter { item in
-                    guard let coord = item.placemark.location?.coordinate else { return false }
-                    return isCoordinateInsideAnyHeat(coord)
-                }
-                let annotations: [POIAnnotation] = filtered.map { mi in
-                    POIAnnotation(
-                        coordinate: mi.placemark.coordinate,
-                        title: mi.name,
-                        subtitle: mi.pointOfInterestCategory?.rawValue
-                    )
-                }
-                DispatchQueue.main.async {
-                    self.poiAnnotations = annotations
-                }
-            }
-        }
-    }
+    // MARK: - POIs are now handled natively by MapKit
 
     private func isCoordinateInsideAnyHeat(_ coord: CLLocationCoordinate2D) -> Bool {
         // Approximate: within any blob group's stroked hull radius envelope
@@ -270,7 +262,7 @@ struct MapHomeView: View {
         group.notify(queue: .main) {
             heatBlobGroups = groups
             heatOverlays = [] // no per-point circles needed when using blob
-            refreshPOIs()
+            // POIs are now handled natively by MapKit
         }
     }
 
@@ -279,5 +271,117 @@ struct MapHomeView: View {
         let deltaLat = metersNorth / metersPerDegreeLat
         let deltaLon = metersEast / (metersPerDegreeLat * cos(base.latitude * .pi / 180))
         return CLLocationCoordinate2D(latitude: base.latitude + deltaLat, longitude: base.longitude + deltaLon)
+    }
+    
+    // MARK: - Location Detail Sheet
+    
+    private func handleAnnotationTap(annotation: POIAnnotation, tapPoint: CGPoint) {
+        // Convert POIAnnotation to LocationDetail
+        let locationDetail = createLocationDetail(from: annotation)
+        
+        selectedLocationDetail = locationDetail
+        detailSheetOriginPoint = tapPoint
+        showingLocationDetail = true
+        
+        // Add haptic feedback
+        HapticFeedbackManager.shared.impact(.light)
+    }
+    
+    private func createLocationDetail(from annotation: POIAnnotation) -> LocationDetail {
+        // Convert POI category to our PlaceCategory
+        let category = mapPOICategoryToPlaceCategory(annotation.subtitle)
+        
+        // Create a basic LocationDetail
+        return LocationDetail(
+            name: annotation.title ?? "Unknown Place",
+            category: category,
+            coordinate: annotation.coordinate,
+            address: nil, // We don't have address from POI annotations
+            phoneNumber: nil,
+            website: nil,
+            hours: nil,
+            images: [], // No images available from POI
+            rating: Double.random(in: 3.5...4.8), // Mock rating for demo
+            priceLevel: generateMockPriceLevel(for: category),
+            amenities: generateMockAmenities(for: category),
+            userFavoriteStatus: .notFavorited
+        )
+    }
+    
+    private func mapPOICategoryToPlaceCategory(_ poiCategory: String?) -> PlaceCategory {
+        guard let category = poiCategory?.lowercased() else { return .other }
+        
+        switch category {
+        case let c where c.contains("restaurant") || c.contains("food"):
+            return .restaurant
+        case let c where c.contains("cafe") || c.contains("coffee"):
+            return .cafe
+        case let c where c.contains("bar") || c.contains("nightlife"):
+            return .bar
+        case let c where c.contains("park"):
+            return .park
+        case let c where c.contains("store") || c.contains("shop") || c.contains("retail"):
+            return .shopping
+        case let c where c.contains("museum"):
+            return .museum
+        case let c where c.contains("gym") || c.contains("fitness") || c.contains("fitnesscenter"):
+            return .gym
+        case let c where c.contains("hospital") || c.contains("medical"):
+            return .hospital
+        case let c where c.contains("school") || c.contains("university"):
+            return .school
+        case let c where c.contains("library"):
+            return .library
+        case let c where c.contains("gas"):
+            return .gasStation
+        case let c where c.contains("pharmacy") || c.contains("bank"):
+            return .bank
+        default:
+            return .other
+        }
+    }
+    
+    private func generateMockPriceLevel(for category: PlaceCategory) -> LocationDetail.PriceLevel? {
+        switch category {
+        case .restaurant, .fineDining:
+            return [.moderate, .expensive].randomElement()
+        case .cafe:
+            return [.budget, .moderate].randomElement()
+        case .bar:
+            return [.moderate, .expensive].randomElement()
+        case .fastFood:
+            return .budget
+        default:
+            return nil
+        }
+    }
+    
+    private func generateMockAmenities(for category: PlaceCategory) -> [String] {
+        switch category {
+        case .restaurant, .fineDining:
+            return ["Outdoor seating", "WiFi", "Accepts credit cards", "Reservations recommended"]
+        case .cafe:
+            return ["WiFi", "Outdoor seating", "Accepts credit cards", "Laptop friendly"]
+        case .bar:
+            return ["Happy hour", "Live music", "Credit cards accepted", "Late night"]
+        case .park:
+            return ["Dog friendly", "Picnic areas", "Walking trails", "Free parking"]
+        case .shopping:
+            return ["Credit cards accepted", "Returns accepted", "Personal shopping"]
+        case .museum:
+            return ["Guided tours", "Gift shop", "Audio guide", "Student discounts"]
+        case .gym:
+            return ["Locker rooms", "Personal training", "Group classes", "Equipment rental"]
+        case .hospital:
+            return ["Emergency services", "Parking available", "Wheelchair accessible", "Insurance accepted"]
+        case .school, .library:
+            return ["Public access", "WiFi", "Study areas", "Parking available"]
+        case .gasStation:
+            return ["24/7", "Convenience store", "Car wash", "Credit cards accepted"]
+        case .bank:
+            return ["ATM", "Drive-through", "Online banking", "Safe deposit boxes"]
+        default:
+            return ["Credit cards accepted"]
+        }
     }
 } 

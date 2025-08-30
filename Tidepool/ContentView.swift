@@ -10,18 +10,17 @@ import MapKit
 import UIKit
 
 struct ContentView: View {
-    @State private var selection: Int = 0
     @AppStorage("has_onboarded") private var hasOnboarded: Bool = false
     @State private var showOnboarding: Bool = false
+    @State private var showLayers: Bool = false
 
     var body: some View {
-        ZStack(alignment: .bottom) {
-            Group {
-                if selection == 0 { MapHomeView() } else { ProfileView() }
-            }
-            .ignoresSafeArea()
+        ZStack(alignment: .bottomTrailing) {
+            MapHomeView()
+                .ignoresSafeArea()
 
-            FloatingTabBar(selection: $selection)
+            LayersButton(showLayers: $showLayers)
+                .padding(.trailing, 20)
                 .padding(.bottom, 20)
         }
         .fontDesign(.rounded)
@@ -32,20 +31,36 @@ struct ContentView: View {
         .fullScreenCover(isPresented: $showOnboarding) {
             OnboardingView()
         }
+        .sheet(isPresented: $showLayers) {
+            ProfileView()
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+                .presentationCornerRadius(20)
+                .presentationBackgroundInteraction(.enabled(upThrough: .medium))
+        }
     }
 }
 
-struct FloatingTabBar: View {
-    @Binding var selection: Int
+struct LayersButton: View {
+    @Binding var showLayers: Bool
     @Environment(\.colorScheme) private var colorScheme
 
-    private let iconSize: CGFloat = 24
+    private let iconSize: CGFloat = 28
 
     var body: some View {
-        HStack(spacing: 28) {
-            tabButton(index: 0, systemName: "map.fill")
-            tabButton(index: 1, systemName: "person.circle.fill")
+        Button(action: { 
+            HapticFeedbackManager.shared.impact(.light)
+            showLayers = true 
+        }) {
+            Image(systemName: "square.stack.3d.down.right.fill")
+                .resizable()
+                .scaledToFit()
+                .foregroundStyle(colorScheme == .dark ? .white : .black)
+                .frame(width: iconSize, height: iconSize)
         }
+        .buttonStyle(.plain)
+        .contentShape(Rectangle())
+        .frame(width: 44, height: 44)
         .padding(.horizontal, 22)
         .padding(.vertical, 12)
         .background(backgroundView)
@@ -55,32 +70,6 @@ struct FloatingTabBar: View {
             RoundedRectangle(cornerRadius: 28, style: .continuous)
                 .strokeBorder((colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.08)), lineWidth: 1)
         )
-        .frame(maxWidth: 260)
-        .frame(maxWidth: .infinity)
-    }
-
-    @ViewBuilder
-    private func tabButton(index: Int, systemName: String) -> some View {
-        Button(action: { selection = index }) {
-            if selection == index {
-                RadialGradient(gradient: Gradient(colors: [Color(hex: "#9CE3A3")!, Color(hex: "#A6E4F8")!]), center: .center, startRadius: 0, endRadius: 16)
-                    .mask(
-                        Image(systemName: systemName)
-                            .resizable()
-                            .scaledToFit()
-                    )
-                    .frame(width: iconSize, height: iconSize)
-            } else {
-                Image(systemName: systemName)
-                    .resizable()
-                    .scaledToFit()
-                    .foregroundStyle(.secondary)
-                    .frame(width: iconSize, height: iconSize)
-            }
-        }
-        .buttonStyle(.plain)
-        .contentShape(Rectangle())
-        .frame(width: 44, height: 44)
     }
 
     private var backgroundView: some View {

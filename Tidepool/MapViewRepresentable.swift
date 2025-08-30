@@ -262,6 +262,7 @@ struct MapViewRepresentable: UIViewRepresentable {
     let heatBlobGroups: [HeatBlobGroup]
     let highContrast: Bool
     let poiAnnotations: [POIAnnotation]
+    let onAnnotationTap: ((POIAnnotation, CGPoint) -> Void)?
 
     func makeUIView(context: Context) -> MKMapView {
         let mapView = MKMapView(frame: .zero)
@@ -275,9 +276,10 @@ struct MapViewRepresentable: UIViewRepresentable {
             let cfg = MKStandardMapConfiguration(elevationStyle: .flat, emphasisStyle: .muted)
             mapView.preferredConfiguration = cfg
         }
-        // Hide built-in Apple POIs; we'll add filtered ones manually
+        // Show native Apple POIs with their original icons
         if #available(iOS 13.0, *) {
-            mapView.pointOfInterestFilter = .excludingAll
+            let categories: [MKPointOfInterestCategory] = [.cafe, .restaurant, .nightlife, .park, .store, .museum, .hospital, .school, .library, .gasStation, .pharmacy, .bank, .hotel, .theater, .fitnessCenter]
+            mapView.pointOfInterestFilter = MKPointOfInterestFilter(including: categories)
         }
         return mapView
     }
@@ -302,22 +304,25 @@ struct MapViewRepresentable: UIViewRepresentable {
             mapView.addOverlay(circle)
         }
 
-        // Update POI annotations
+        // POI annotations are now handled natively by MapKit
+        // Remove any custom POI annotations if they exist
         let existing = mapView.annotations.compactMap { $0 as? POIAnnotation }
         mapView.removeAnnotations(existing)
-        mapView.addAnnotations(poiAnnotations)
 
         // Do not override camera/region; keep following the user location
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(getHighContrast: { self.highContrast })
+        Coordinator(getHighContrast: { self.highContrast }, onAnnotationTap: onAnnotationTap)
     }
 
     final class Coordinator: NSObject, MKMapViewDelegate {
         private let getHighContrast: () -> Bool
-        init(getHighContrast: @escaping () -> Bool) {
+        private let onAnnotationTap: ((POIAnnotation, CGPoint) -> Void)?
+        
+        init(getHighContrast: @escaping () -> Bool, onAnnotationTap: ((POIAnnotation, CGPoint) -> Void)?) {
             self.getHighContrast = getHighContrast
+            self.onAnnotationTap = onAnnotationTap
         }
 
         func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
@@ -341,18 +346,45 @@ struct MapViewRepresentable: UIViewRepresentable {
         }
 
         func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
-            guard annotation is POIAnnotation else { return nil }
-            let identifier = "POIMarker"
-            var view = mapView.dequeueReusableAnnotationView(withIdentifier: identifier) as? MKMarkerAnnotationView
-            if view == nil {
-                view = MKMarkerAnnotationView(annotation: annotation, reuseIdentifier: identifier)
-                view?.canShowCallout = true
-                view?.glyphImage = UIImage(systemName: "mappin.circle.fill")
-                view?.markerTintColor = UIColor(hex: "#7BC9FF") ?? .systemTeal
-            } else {
-                view?.annotation = annotation
+            // Let MapKit handle native POI annotations with their default appearance
+            // Only customize our custom POI annotations if any exist
+            if annotation is POIAnnotation {
+                let identifier = "POIMarker"
+                var view = mapView.dequeueReusableAnnotationView(withIdentifier: identifier) as? MKMarkerAnnotationView
+                if view == nil {
+                    view = MKMarkerAnnotationView(annotation: annotation, reuseIdentifier: identifier)
+                    view?.canShowCallout = true
+                    view?.glyphImage = UIImage(systemName: "mappin.circle.fill")
+                    view?.markerTintColor = UIColor(hex: "#7BC9FF") ?? .systemTeal
+                } else {
+                    view?.annotation = annotation
+                }
+                return view
             }
-            return view
+            
+            // Return nil to let MapKit use default native POI appearance
+            return nil
+        }
+        
+        func mapView(_ mapView: MKMapView, didSelect view: MKAnnotationView) {
+            // Handle both custom POIAnnotation and native POI annotations
+            if let poiAnnotation = view.annotation as? POIAnnotation {
+                // Custom POI annotation
+                let tapPoint = mapView.convert(view.center, to: nil)
+                onAnnotationTap?(poiAnnotation, tapPoint)
+                mapView.deselectAnnotation(poiAnnotation, animated: false)
+            } else if let annotation = view.annotation,
+                      !(annotation is MKUserLocation) {
+                // Native POI annotation - convert to our POIAnnotation format
+                let poiAnnotation = POIAnnotation(
+                    coordinate: annotation.coordinate,
+                    title: annotation.title ?? "Unknown Place",
+                    subtitle: nil // Native POIs don't expose category directly
+                )
+                let tapPoint = mapView.convert(view.center, to: nil)
+                onAnnotationTap?(poiAnnotation, tapPoint)
+                mapView.deselectAnnotation(annotation, animated: false)
+            }
         }
     }
 } 

@@ -549,12 +549,13 @@ Constraints: All integrations must produce abstracted tags or embeddings, never 
 - [x] Info.plist strings + Privacy Manifest reasons 
 - [x] High-contrast heatmap option
 - [x] Data export/delete (local settings and Home)
-- [ ] Apple Maps saved locations integration (MapKit APIs) - Priority 1
-- [ ] Photos location clustering and categorization - Priority 2
-- [ ] Core animation system with spring physics parameters
-- [ ] Location detail action sheet with fluid emergence animations
-- [ ] In-app favorites/rating system with satisfying micro-interactions
-- [ ] Shared element transitions for persistent UI components
+- [x] Apple Maps saved locations integration (MapKit APIs) - Priority 1
+- [x] Photos location clustering and categorization - Priority 2
+- [x] Core animation system with spring physics parameters
+- [x] Location detail action sheet with fluid emergence animations
+- [x] In-app favorites/rating system with satisfying micro-interactions
+- [x] Interest vector computation from Apple Maps and Photos data
+- [x] Shared element transitions for persistent UI components
 - [ ] Search interface with fluid expansion and staggered results
 - [ ] Search API integration with personalized ranking
 - [ ] Search ranking model architecture and training pipeline 
