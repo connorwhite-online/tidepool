@@ -2,18 +2,23 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>Spotify OAuth Callback</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>tidepool-spotify</string>
+			</array>
+		</dict>
+	</array>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>remote-notification</string>
 		<string>location</string>
 	</array>
-	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>Tidepool uses your location to show your own approximate presence ring, render nearby interest heatmaps, and help you discover places that match your interests. We never share your precise location.</string>
-	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
-	<string>Tidepool uses location in the background to update presence and heatmaps when you opt in. We never share your precise location.</string>
-	<key>NSPhotoLibraryUsageDescription</key>
-	<string>Tidepool may use your photos' location tags (if you opt in) to infer place categories and improve interest heatmaps. Photos themselves never leave your device.</string>
-	<key>NSPhotoLibraryAddUsageDescription</key>
-	<string>Tidepool may save images only for features you explicitly use (like exports). No photos are uploaded without your consent.</string>
 </dict>
 </plist>

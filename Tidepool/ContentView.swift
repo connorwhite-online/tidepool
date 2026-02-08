@@ -12,16 +12,27 @@ import UIKit
 struct ContentView: View {
     @AppStorage("has_onboarded") private var hasOnboarded: Bool = false
     @State private var showOnboarding: Bool = false
-    @State private var showLayers: Bool = false
+    @State private var navigationPath = NavigationPath()
 
     var body: some View {
-        ZStack(alignment: .bottomTrailing) {
-            MapHomeView()
-                .ignoresSafeArea()
+        NavigationStack(path: $navigationPath) {
+            ZStack(alignment: .bottomTrailing) {
+                MapHomeView()
+                    .ignoresSafeArea()
 
-            LayersButton(showLayers: $showLayers)
+                LayersButton {
+                    navigationPath.append("layers")
+                }
                 .padding(.trailing, 20)
                 .padding(.bottom, 20)
+            }
+            .navigationBarHidden(true)
+            .navigationDestination(for: String.self) { destination in
+                if destination == "layers" {
+                    ProfileView()
+                        .navigationBarBackButtonHidden(true)
+                }
+            }
         }
         .fontDesign(.rounded)
         .onAppear { showOnboarding = !hasOnboarded }
@@ -31,26 +42,20 @@ struct ContentView: View {
         .fullScreenCover(isPresented: $showOnboarding) {
             OnboardingView()
         }
-        .sheet(isPresented: $showLayers) {
-            ProfileView()
-                .presentationDetents([.medium, .large])
-                .presentationDragIndicator(.visible)
-                .presentationCornerRadius(20)
-                .presentationBackgroundInteraction(.enabled(upThrough: .medium))
-        }
     }
 }
 
 struct LayersButton: View {
-    @Binding var showLayers: Bool
+    let action: () -> Void
     @Environment(\.colorScheme) private var colorScheme
 
     private let iconSize: CGFloat = 28
+    private let cornerRadius: CGFloat = 20
 
     var body: some View {
-        Button(action: { 
+        Button(action: {
             HapticFeedbackManager.shared.impact(.light)
-            showLayers = true 
+            action()
         }) {
             Image(systemName: "square.stack.3d.down.right.fill")
                 .resizable()
@@ -61,14 +66,27 @@ struct LayersButton: View {
         .buttonStyle(.plain)
         .contentShape(Rectangle())
         .frame(width: 44, height: 44)
-        .padding(.horizontal, 22)
+        .padding(.leading, 22)
+        .padding(.trailing, 22)
         .padding(.vertical, 12)
         .background(backgroundView)
-        .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .clipShape(
+            UnevenRoundedRectangle(
+                topLeadingRadius: cornerRadius,
+                bottomLeadingRadius: cornerRadius,
+                bottomTrailingRadius: 0,
+                topTrailingRadius: 0
+            )
+        )
         .shadow(color: .black.opacity(colorScheme == .dark ? 0.1 : 0.06), radius: 12, x: 0, y: 8)
         .overlay(
-            RoundedRectangle(cornerRadius: 28, style: .continuous)
-                .strokeBorder((colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.08)), lineWidth: 1)
+            UnevenRoundedRectangle(
+                topLeadingRadius: cornerRadius,
+                bottomLeadingRadius: cornerRadius,
+                bottomTrailingRadius: 0,
+                topTrailingRadius: 0
+            )
+            .strokeBorder((colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.08)), lineWidth: 1)
         )
     }
 
@@ -76,7 +94,6 @@ struct LayersButton: View {
         ZStack {
             // Blur/translucency adaptive to color scheme
             VisualEffectBlur(blurStyle: colorScheme == .dark ? .systemMaterialDark : .systemThinMaterialLight)
-                .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
             // Subtle vertical gradient (tuned per scheme)
             LinearGradient(
                 colors: colorScheme == .dark
@@ -85,7 +102,6 @@ struct LayersButton: View {
                 startPoint: .bottom,
                 endPoint: .top
             )
-            .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
         }
     }
 }

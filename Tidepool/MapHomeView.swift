@@ -69,42 +69,39 @@ struct MapHomeView: View {
     }
 
     var body: some View {
-        NavigationStack {
-            mapView
-                .onAppear {
-                    location.requestAuthorization()
-                    if !mockSpotsLoaded {
-                        loadMockHeatSpots()
-                        mockSpotsLoaded = true
-                    }
-                    updatePresenceOverlay()
-                    updateTileId()
-                    // POIs are now handled natively by MapKit
-                    presenceReporter.start(using: location)
+        mapView
+            .onAppear {
+                location.requestAuthorization()
+                if !mockSpotsLoaded {
+                    loadMockHeatSpots()
+                    mockSpotsLoaded = true
                 }
-                .onDisappear {
-                    presenceReporter.stop()
+                updatePresenceOverlay()
+                updateTileId()
+                // POIs are now handled natively by MapKit
+                presenceReporter.start(using: location)
+            }
+            .onDisappear {
+                presenceReporter.stop()
+            }
+            .onChange(of: location.latestLocation) { _, _ in
+                updatePresenceOverlay()
+                updateTileId()
+                // POIs are now handled natively by MapKit
+            }
+            .onChange(of: heatBlobGroups) { _, _ in
+                // Heat blobs updated - no need to refresh POIs as they're native
+            }
+            .sheet(isPresented: $showingLocationDetail) {
+                if let locationDetail = selectedLocationDetail {
+                    LocationDetailSheet(
+                        location: locationDetail,
+                        originPoint: detailSheetOriginPoint,
+                        isPresented: $showingLocationDetail,
+                        favoritesManager: favoritesManager
+                    )
                 }
-                .onChange(of: location.latestLocation) { _, _ in
-                    updatePresenceOverlay()
-                    updateTileId()
-                    // POIs are now handled natively by MapKit
-                }
-                .onChange(of: heatBlobGroups) { _, _ in
-                    // Heat blobs updated - no need to refresh POIs as they're native
-                }
-                .toolbar(.hidden, for: .navigationBar)
-                .sheet(isPresented: $showingLocationDetail) {
-                    if let locationDetail = selectedLocationDetail {
-                        LocationDetailSheet(
-                            location: locationDetail,
-                            originPoint: detailSheetOriginPoint,
-                            isPresented: $showingLocationDetail,
-                            favoritesManager: favoritesManager
-                        )
-                    }
-                }
-        }
+            }
     }
 
     private var debugTileIdHUD: some View {

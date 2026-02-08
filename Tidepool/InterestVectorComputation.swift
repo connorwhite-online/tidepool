@@ -13,39 +13,58 @@ class InterestVectorManager: ObservableObject {
     private let appleMapsManager: AppleMapsIntegrationManager
     private let photosManager: PhotosIntegrationManager
     private let favoritesManager: InAppFavoritesManager
-    
-    // Canonical vocabulary for interest tags (this would be expanded significantly)
+    private let spotifyManager: SpotifyIntegrationManager?
+    private let appleMusicManager: AppleMusicIntegrationManager?
+    private let ageRangeManager: AgeRangeManager?
+
+    // Canonical vocabulary for interest tags (expanded with music genres)
     private let vocabulary = [
         // Venue types
         "dining", "restaurant", "cafe", "coffee", "bar", "nightlife", "fast_food",
         "fine_dining", "bakery", "grocery", "shopping", "mall", "bookstore",
-        
+        "wine_bar", "craft_beer", "cocktails", "brewery",
+
         // Activities & Recreation
         "outdoor", "nature", "park", "beach", "hiking", "fitness", "gym", "sports",
         "entertainment", "movies", "theater", "museum", "culture", "arts",
         "music", "live_music", "concerts",
-        
+
         // Social & Lifestyle
         "social", "casual", "work", "study", "quiet", "family_friendly",
-        "romantic", "business", "networking", "date_night",
-        
+        "romantic", "business", "networking", "date_night", "all_ages",
+
         // Characteristics
         "convenient", "trendy", "local", "tourist", "hidden_gem", "popular",
         "affordable", "upscale", "budget", "luxury", "good_value",
-        
+
         // Services & Amenities
         "wifi", "parking", "takeout", "delivery", "reservations", "pet_friendly",
         "accessible", "outdoor_seating", "drive_through",
-        
+
         // Time & Frequency
         "daily", "weekly", "special_occasion", "regular", "frequent", "occasional",
-        
+
         // Quality indicators
         "highly_rated", "recommended", "favorite", "must_visit", "avoid",
-        
+
         // Mood & Context
         "relaxing", "energetic", "productive", "creative", "inspiring",
-        "comfortable", "atmospheric", "cozy", "modern", "traditional"
+        "comfortable", "atmospheric", "cozy", "modern", "traditional",
+
+        // Music Genres
+        "rock", "pop", "hip_hop", "rap", "electronic", "dance", "jazz", "blues",
+        "classical", "country", "folk", "metal", "r_and_b", "soul", "funk",
+        "reggae", "latin", "world", "indie", "alternative", "punk", "ambient",
+
+        // Music Sub-genres
+        "house", "techno", "trance", "dubstep", "trap", "lofi", "synthwave",
+
+        // Music Styles / Vibes
+        "acoustic", "instrumental", "vocal", "orchestral", "chill", "upbeat",
+        "melancholic", "experimental", "progressive", "classic", "retro",
+
+        // Music Activities
+        "party", "workout", "mainstream", "underground"
     ]
     
     enum VectorQuality {
@@ -73,11 +92,21 @@ class InterestVectorManager: ObservableObject {
         }
     }
     
-    init(appleMapsManager: AppleMapsIntegrationManager, photosManager: PhotosIntegrationManager, favoritesManager: InAppFavoritesManager) {
+    init(
+        appleMapsManager: AppleMapsIntegrationManager,
+        photosManager: PhotosIntegrationManager,
+        favoritesManager: InAppFavoritesManager,
+        spotifyManager: SpotifyIntegrationManager? = nil,
+        appleMusicManager: AppleMusicIntegrationManager? = nil,
+        ageRangeManager: AgeRangeManager? = nil
+    ) {
         self.appleMapsManager = appleMapsManager
         self.photosManager = photosManager
         self.favoritesManager = favoritesManager
-        
+        self.spotifyManager = spotifyManager
+        self.appleMusicManager = appleMusicManager
+        self.ageRangeManager = ageRangeManager
+
         loadCachedVector()
         computeVector()
     }
@@ -93,14 +122,16 @@ class InterestVectorManager: ObservableObject {
     
     private func aggregateTagsFromAllSources() -> [String: Float] {
         var aggregatedTags: [String: Float] = [:]
-        
+
         // Weight different sources based on reliability and user intent
         let sourceWeights: [String: Float] = [
             "favorites": 1.0,     // Highest weight - explicit user preferences
+            "spotify": 0.9,       // High weight - explicit music preferences
+            "apple_music": 0.9,   // High weight - explicit music preferences
             "apple_maps": 0.8,    // High weight - user's saved places
             "photos": 0.6         // Medium weight - inferred from behavior
         ]
-        
+
         // Aggregate from in-app favorites (highest priority)
         let favoritesTags = favoritesManager.getInterestTags()
         for (tag, count) in favoritesTags {
@@ -109,7 +140,29 @@ class InterestVectorManager: ObservableObject {
                 aggregatedTags[normalizedTag, default: 0] += Float(count) * sourceWeights["favorites"]!
             }
         }
-        
+
+        // Aggregate from Spotify (if connected)
+        if let spotifyManager = spotifyManager {
+            let spotifyTags = spotifyManager.getInterestTags()
+            for (tag, count) in spotifyTags {
+                let normalizedTag = normalizeTag(tag)
+                if vocabulary.contains(normalizedTag) {
+                    aggregatedTags[normalizedTag, default: 0] += Float(count) * sourceWeights["spotify"]!
+                }
+            }
+        }
+
+        // Aggregate from Apple Music (if connected)
+        if let appleMusicManager = appleMusicManager {
+            let appleMusicTags = appleMusicManager.getInterestTags()
+            for (tag, count) in appleMusicTags {
+                let normalizedTag = normalizeTag(tag)
+                if vocabulary.contains(normalizedTag) {
+                    aggregatedTags[normalizedTag, default: 0] += Float(count) * sourceWeights["apple_music"]!
+                }
+            }
+        }
+
         // Aggregate from Apple Maps saved locations
         let appleMapsTagCounts = appleMapsManager.getInterestTags()
         for (tag, count) in appleMapsTagCounts {
@@ -118,7 +171,7 @@ class InterestVectorManager: ObservableObject {
                 aggregatedTags[normalizedTag, default: 0] += Float(count) * sourceWeights["apple_maps"]!
             }
         }
-        
+
         // Aggregate from Photos analysis
         let photosTagCounts = photosManager.getInterestTags()
         for (tag, count) in photosTagCounts {
@@ -127,7 +180,19 @@ class InterestVectorManager: ObservableObject {
                 aggregatedTags[normalizedTag, default: 0] += Float(count) * sourceWeights["photos"]!
             }
         }
-        
+
+        // Aggregate from Age Range (if set) - high weight for filtering
+        if let ageRangeManager = ageRangeManager, ageRangeManager.isAuthorized {
+            let ageRangeTags = ageRangeManager.getInterestTags()
+            for (tag, count) in ageRangeTags {
+                let normalizedTag = normalizeTag(tag)
+                if vocabulary.contains(normalizedTag) {
+                    // Age range tags can be negative (to deprioritize adult venues for minors)
+                    aggregatedTags[normalizedTag, default: 0] += Float(count)
+                }
+            }
+        }
+
         return aggregatedTags
     }
     
@@ -189,17 +254,19 @@ class InterestVectorManager: ObservableObject {
     }
     
     private func assessVectorQuality(_ tagCounts: [String: Float]) -> VectorQuality {
-        let totalDataSources: Float = 3.0 // favorites, apple_maps, photos
+        let totalDataSources: Float = 5.0 // favorites, spotify, apple_music, apple_maps, photos
         var activeDataSources: Float = 0.0
-        
+
         if !favoritesManager.favorites.isEmpty { activeDataSources += 1.0 }
+        if let spotifyManager = spotifyManager, !spotifyManager.topArtists.isEmpty { activeDataSources += 1.0 }
+        if let appleMusicManager = appleMusicManager, !appleMusicManager.recentlyPlayed.isEmpty { activeDataSources += 1.0 }
         if !appleMapsManager.savedLocations.isEmpty { activeDataSources += 1.0 }
         if !photosManager.clusters.isEmpty { activeDataSources += 1.0 }
-        
+
         let dataSourceCoverage = activeDataSources / totalDataSources
         let tagCoverage = Float(tagCounts.count) / Float(vocabulary.count)
         let totalCoverage = (dataSourceCoverage + tagCoverage) / 2.0
-        
+
         switch totalCoverage {
         case 0.75...: return .excellent
         case 0.5..<0.75: return .good
@@ -282,9 +349,15 @@ class InterestVectorManager: ObservableObject {
     
     private func getActiveDataSources() -> [String] {
         var sources: [String] = []
-        
+
         if !favoritesManager.favorites.isEmpty {
             sources.append("In-app favorites")
+        }
+        if let spotifyManager = spotifyManager, !spotifyManager.topArtists.isEmpty {
+            sources.append("Spotify")
+        }
+        if let appleMusicManager = appleMusicManager, !appleMusicManager.recentlyPlayed.isEmpty {
+            sources.append("Apple Music")
         }
         if !appleMapsManager.savedLocations.isEmpty {
             sources.append("Saved places")
@@ -292,7 +365,7 @@ class InterestVectorManager: ObservableObject {
         if !photosManager.clusters.isEmpty {
             sources.append("Photos analysis")
         }
-        
+
         return sources
     }
     
@@ -558,6 +631,8 @@ struct InterestInsightsDetailView: View {
     InterestVectorView(vectorManager: InterestVectorManager(
         appleMapsManager: AppleMapsIntegrationManager(),
         photosManager: PhotosIntegrationManager(),
-        favoritesManager: InAppFavoritesManager()
+        favoritesManager: InAppFavoritesManager(),
+        spotifyManager: SpotifyIntegrationManager(),
+        appleMusicManager: AppleMusicIntegrationManager()
     ))
 }
