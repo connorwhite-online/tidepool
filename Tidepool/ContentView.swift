@@ -23,8 +23,7 @@ struct ContentView: View {
                 LayersButton {
                     navigationPath.append("layers")
                 }
-                .padding(.trailing, 20)
-                .padding(.bottom, 20)
+                .padding(.bottom, 50)
             }
             .navigationBarHidden(true)
             .navigationDestination(for: String.self) { destination in
@@ -66,9 +65,9 @@ struct LayersButton: View {
         .buttonStyle(.plain)
         .contentShape(Rectangle())
         .frame(width: 44, height: 44)
-        .padding(.leading, 22)
-        .padding(.trailing, 22)
-        .padding(.vertical, 12)
+        .padding(.leading, 14)
+        .padding(.trailing, 14)
+        .padding(.vertical, 10)
         .background(backgroundView)
         .clipShape(
             UnevenRoundedRectangle(
