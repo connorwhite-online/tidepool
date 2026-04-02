@@ -158,10 +158,7 @@ enum SpotifyError: LocalizedError {
 class SpotifyAuthManager: NSObject {
     // IMPORTANT: Replace with your actual Spotify Client ID from developer.spotify.com/dashboard
     // For development, you can also use environment variables or a config file
-    private let clientID: String = {
-        // Try to get from environment or use placeholder
-        ProcessInfo.processInfo.environment["SPOTIFY_CLIENT_ID"] ?? "YOUR_SPOTIFY_CLIENT_ID"
-    }()
+    private let clientID = "01006395896b4d809b9d107c5e2348b7"
 
     private let redirectURI = "tidepool-spotify://callback"
     private let scopes = "user-top-read user-read-recently-played"

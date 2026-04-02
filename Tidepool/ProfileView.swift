@@ -263,7 +263,9 @@ struct ProfileView: View {
             Divider()
 
             Button("Disconnect", role: .destructive) {
-                spotifyManager.disconnect()
+                DispatchQueue.main.async {
+                    spotifyManager.disconnect()
+                }
             }
         } label: {
             VStack(alignment: .trailing, spacing: 2) {
