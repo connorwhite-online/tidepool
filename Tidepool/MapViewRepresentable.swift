@@ -262,7 +262,10 @@ struct MapViewRepresentable: UIViewRepresentable {
     let heatBlobGroups: [HeatBlobGroup]
     let highContrast: Bool
     let poiAnnotations: [POIAnnotation]
+    let isDetailShowing: Bool
+    @Binding var navigateToCoordinate: CLLocationCoordinate2D?
     let onAnnotationTap: ((POIAnnotation, CGPoint) -> Void)?
+    let onCenterChanged: ((CLLocationCoordinate2D) -> Void)?
 
     func makeUIView(context: Context) -> MKMapView {
         let mapView = MKMapView(frame: .zero)
@@ -272,6 +275,7 @@ struct MapViewRepresentable: UIViewRepresentable {
         mapView.isRotateEnabled = true
         mapView.isPitchEnabled = true
         mapView.isZoomEnabled = true
+        mapView.showsCompass = false
         if #available(iOS 16.0, *) {
             let cfg = MKStandardMapConfiguration(elevationStyle: .flat, emphasisStyle: .muted)
             mapView.preferredConfiguration = cfg
@@ -281,10 +285,97 @@ struct MapViewRepresentable: UIViewRepresentable {
             let categories: [MKPointOfInterestCategory] = [.cafe, .restaurant, .nightlife, .park, .store, .museum, .hospital, .school, .library, .gasStation, .pharmacy, .bank, .hotel, .theater, .fitnessCenter]
             mapView.pointOfInterestFilter = MKPointOfInterestFilter(including: categories)
         }
+        // Enable tap-to-select on native POI features (iOS 16+)
+        if #available(iOS 16.0, *) {
+            mapView.selectableMapFeatures = [.pointsOfInterest]
+        }
+
         return mapView
     }
 
+    /// Repositions Apple logo to bottom-center and hides the Legal link.
+    private static var attributionAdjusted = false
+    static func adjustAttributionViews(in mapView: MKMapView) {
+        guard !attributionAdjusted else { return }
+        guard mapView.bounds.width > 0 else { return }
+
+        // Recursively collect all subviews in the hierarchy
+        func allDescendants(of view: UIView) -> [UIView] {
+            var result: [UIView] = []
+            for sub in view.subviews {
+                result.append(sub)
+                result += allDescendants(of: sub)
+            }
+            return result
+        }
+
+        let allViews = allDescendants(of: mapView)
+        var foundLogo = false
+        var foundLegal = false
+
+        for view in allViews {
+            let typeName = String(describing: type(of: view))
+
+            // The Apple Maps logo: internal class typically contains "Logo"
+            if typeName.lowercased().contains("logo") {
+                foundLogo = true
+                view.translatesAutoresizingMaskIntoConstraints = false
+                // Deactivate existing positioning constraints
+                for constraint in view.superview?.constraints ?? [] {
+                    if constraint.firstItem === view || constraint.secondItem === view {
+                        constraint.isActive = false
+                    }
+                }
+                NSLayoutConstraint.activate([
+                    view.centerXAnchor.constraint(equalTo: mapView.centerXAnchor),
+                    view.bottomAnchor.constraint(equalTo: mapView.bottomAnchor, constant: -4)
+                ])
+                continue
+            }
+
+            // The Legal/Attribution link: class typically contains "Attribution" or "Legal"
+            if typeName.lowercased().contains("attribution") || typeName.lowercased().contains("legal") {
+                foundLegal = true
+                view.isHidden = true
+                continue
+            }
+        }
+
+        if foundLogo || foundLegal {
+            attributionAdjusted = true
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
     func updateUIView(_ mapView: MKMapView, context: Context) {
+        // Reposition Apple logo to bottom-center, hide Legal link
+        Self.adjustAttributionViews(in: mapView)
+
+        // Keep coordinator in sync with latest closures and state
+        context.coordinator.highContrast = highContrast
+        context.coordinator.onAnnotationTap = onAnnotationTap
+        context.coordinator.onCenterChanged = onCenterChanged
+
+        // Deselect POI when the detail modal is dismissed
+        if !isDetailShowing && context.coordinator.wasDetailShowing {
+            for annotation in mapView.selectedAnnotations {
+                mapView.deselectAnnotation(annotation, animated: true)
+            }
+        }
+        context.coordinator.wasDetailShowing = isDetailShowing
+
+        // Animate to a target coordinate if requested
+        if let target = navigateToCoordinate {
+            let region = MKCoordinateRegion(center: target, latitudinalMeters: 800, longitudinalMeters: 800)
+            mapView.setRegion(region, animated: true)
+            DispatchQueue.main.async {
+                self.navigateToCoordinate = nil
+            }
+        }
+
         mapView.removeOverlays(mapView.overlays)
 
         if !heatBlobGroups.isEmpty {
@@ -304,36 +395,51 @@ struct MapViewRepresentable: UIViewRepresentable {
             mapView.addOverlay(circle)
         }
 
-        // POI annotations are now handled natively by MapKit
-        // Remove any custom POI annotations if they exist
+        // Sync custom POI annotations (e.g. search result pins)
         let existing = mapView.annotations.compactMap { $0 as? POIAnnotation }
-        mapView.removeAnnotations(existing)
+        let existingSet = Set(existing.map { ObjectIdentifier($0) })
+        let newSet = Set(poiAnnotations.map { ObjectIdentifier($0) })
 
-        // Do not override camera/region; keep following the user location
-    }
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(getHighContrast: { self.highContrast }, onAnnotationTap: onAnnotationTap)
+        if existingSet != newSet {
+            mapView.removeAnnotations(existing)
+            if !poiAnnotations.isEmpty {
+                mapView.addAnnotations(poiAnnotations)
+                // Auto-select the pin after a brief delay so the drop animation plays first,
+                // then the selection bounce kicks in
+                let annotations = poiAnnotations
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    for annotation in annotations {
+                        mapView.selectAnnotation(annotation, animated: true)
+                    }
+                }
+            }
+        }
     }
 
     final class Coordinator: NSObject, MKMapViewDelegate {
-        private let getHighContrast: () -> Bool
-        private let onAnnotationTap: ((POIAnnotation, CGPoint) -> Void)?
-        
-        init(getHighContrast: @escaping () -> Bool, onAnnotationTap: ((POIAnnotation, CGPoint) -> Void)?) {
-            self.getHighContrast = getHighContrast
-            self.onAnnotationTap = onAnnotationTap
+        var highContrast: Bool = true
+        var wasDetailShowing: Bool = false
+        var onAnnotationTap: ((POIAnnotation, CGPoint) -> Void)?
+        var onCenterChanged: ((CLLocationCoordinate2D) -> Void)?
+
+        func mapViewDidFinishLoadingMap(_ mapView: MKMapView) {
+            // Best time to adjust attribution — all internal subviews are in place
+            MapViewRepresentable.adjustAttributionViews(in: mapView)
+        }
+
+        func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
+            onCenterChanged?(mapView.centerCoordinate)
         }
 
         func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
             if overlay is HeatBlobOverlay {
-                return HeatBlobRenderer(overlay: overlay, highContrast: getHighContrast())
+                return HeatBlobRenderer(overlay: overlay, highContrast: highContrast)
             }
             if let circle = overlay as? MKCircle {
                 if let title = circle.title, title.hasPrefix("heat:") {
                     let parts = title.split(separator: ":")
                     let intensity = parts.count == 2 ? CGFloat(Double(parts[1]) ?? 0.0) : 0.0
-                    return HeatCircleRenderer(circle: circle, intensity: intensity, highContrast: getHighContrast())
+                    return HeatCircleRenderer(circle: circle, intensity: intensity, highContrast: highContrast)
                 } else {
                     let renderer = MKCircleRenderer(circle: circle)
                     renderer.fillColor = UIColor.systemBlue.withAlphaComponent(0.18)
@@ -348,43 +454,134 @@ struct MapViewRepresentable: UIViewRepresentable {
         func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
             // Let MapKit handle native POI annotations with their default appearance
             // Only customize our custom POI annotations if any exist
-            if annotation is POIAnnotation {
+            if let poi = annotation as? POIAnnotation {
                 let identifier = "POIMarker"
                 var view = mapView.dequeueReusableAnnotationView(withIdentifier: identifier) as? MKMarkerAnnotationView
                 if view == nil {
                     view = MKMarkerAnnotationView(annotation: annotation, reuseIdentifier: identifier)
-                    view?.canShowCallout = true
-                    view?.glyphImage = UIImage(systemName: "mappin.circle.fill")
-                    view?.markerTintColor = UIColor(hex: "#7BC9FF") ?? .systemTeal
+                    view?.canShowCallout = false
+                    view?.animatesWhenAdded = true
+                    view?.displayPriority = .required
                 } else {
                     view?.annotation = annotation
                 }
+
+                // Tidepool-branded search result pin
+                let (icon, _) = Self.categoryAppearance(for: poi.subtitle)
+                view?.glyphImage = UIImage(systemName: icon)
+                view?.markerTintColor = UIColor(hex: "#7BC9FF") ?? .systemTeal
+                view?.titleVisibility = .visible
+                view?.subtitleVisibility = .hidden
+                view?.selectedGlyphImage = UIImage(systemName: icon)
+
                 return view
             }
-            
+
             // Return nil to let MapKit use default native POI appearance
             return nil
         }
+
+        private static func categoryAppearance(for category: String?) -> (icon: String, color: UIColor) {
+            guard let cat = category?.lowercased() else {
+                return ("mappin.circle.fill", UIColor(hex: "#7BC9FF") ?? .systemTeal)
+            }
+
+            switch cat {
+            case let c where c.contains("restaurant") || c.contains("food"):
+                return ("fork.knife", .systemOrange)
+            case let c where c.contains("cafe") || c.contains("coffee"):
+                return ("cup.and.saucer.fill", .brown)
+            case let c where c.contains("bar") || c.contains("nightlife"):
+                return ("wineglass.fill", .systemPurple)
+            case let c where c.contains("park"):
+                return ("tree.fill", .systemGreen)
+            case let c where c.contains("store") || c.contains("shop") || c.contains("retail"):
+                return ("bag.fill", .systemBlue)
+            case let c where c.contains("museum"):
+                return ("building.columns.fill", .systemBrown)
+            case let c where c.contains("gym") || c.contains("fitness"):
+                return ("dumbbell.fill", .systemRed)
+            case let c where c.contains("hospital") || c.contains("medical"):
+                return ("cross.fill", .systemRed)
+            case let c where c.contains("school") || c.contains("university"):
+                return ("graduationcap.fill", .systemIndigo)
+            case let c where c.contains("library"):
+                return ("book.fill", .systemBrown)
+            case let c where c.contains("gas"):
+                return ("fuelpump.fill", .systemOrange)
+            case let c where c.contains("bank") || c.contains("pharmacy"):
+                return ("building.2.fill", .systemTeal)
+            case let c where c.contains("hotel"):
+                return ("bed.double.fill", .systemBlue)
+            default:
+                return ("mappin.circle.fill", UIColor(hex: "#7BC9FF") ?? .systemTeal)
+            }
+        }
         
-        func mapView(_ mapView: MKMapView, didSelect view: MKAnnotationView) {
-            // Handle both custom POIAnnotation and native POI annotations
-            if let poiAnnotation = view.annotation as? POIAnnotation {
-                // Custom POI annotation
-                let tapPoint = mapView.convert(view.center, to: nil)
-                onAnnotationTap?(poiAnnotation, tapPoint)
-                mapView.deselectAnnotation(poiAnnotation, animated: false)
-            } else if let annotation = view.annotation,
-                      !(annotation is MKUserLocation) {
-                // Native POI annotation - convert to our POIAnnotation format
+        // iOS 16+ delegate for selectable map features (native POIs)
+        @available(iOS 16.0, *)
+        func mapView(_ mapView: MKMapView, didSelect annotation: MKAnnotation) {
+            if annotation is MKUserLocation { return }
+
+            // If this is a programmatic selection (search result pin while detail is already showing),
+            // just let the selection animation play — don't re-trigger the detail sheet
+            if annotation is POIAnnotation && wasDetailShowing {
+                return
+            }
+
+            // Smoothly center the map on the tapped POI
+            let targetCoord = annotation.coordinate
+            UIView.animate(withDuration: 0.4, delay: 0, options: .curveEaseInOut) {
+                mapView.setCenter(targetCoord, animated: false)
+            }
+
+            // Convert annotation coordinate to screen point for the sheet origin
+            let mapPoint = mapView.convert(annotation.coordinate, toPointTo: mapView)
+            let screenPoint = mapView.convert(mapPoint, to: nil)
+
+            if let feature = annotation as? MKMapFeatureAnnotation {
+                let categoryString = feature.pointOfInterestCategory?.rawValue
+                let poiAnnotation = POIAnnotation(
+                    coordinate: feature.coordinate,
+                    title: feature.title ?? "Unknown Place",
+                    subtitle: categoryString
+                )
+                onAnnotationTap?(poiAnnotation, screenPoint)
+            } else if let poiAnnotation = annotation as? POIAnnotation {
+                onAnnotationTap?(poiAnnotation, screenPoint)
+            } else {
                 let poiAnnotation = POIAnnotation(
                     coordinate: annotation.coordinate,
                     title: annotation.title ?? "Unknown Place",
-                    subtitle: nil // Native POIs don't expose category directly
+                    subtitle: nil
                 )
-                let tapPoint = mapView.convert(view.center, to: nil)
-                onAnnotationTap?(poiAnnotation, tapPoint)
-                mapView.deselectAnnotation(annotation, animated: false)
+                onAnnotationTap?(poiAnnotation, screenPoint)
             }
+
+            // POI stays selected while detail modal is open — deselection handled in updateUIView
+        }
+
+        // Fallback for pre-iOS 16 (annotation view-based selection)
+        func mapView(_ mapView: MKMapView, didSelect view: MKAnnotationView) {
+            guard let annotation = view.annotation else { return }
+            if annotation is MKUserLocation { return }
+
+            // On iOS 16+, the annotation-based didSelect handles features
+            if #available(iOS 16.0, *) { return }
+
+            // Smoothly center the map on the tapped POI
+            UIView.animate(withDuration: 0.4, delay: 0, options: .curveEaseInOut) {
+                mapView.setCenter(annotation.coordinate, animated: false)
+            }
+
+            let tapPoint = mapView.convert(view.center, to: nil)
+            let poiAnnotation = POIAnnotation(
+                coordinate: annotation.coordinate,
+                title: annotation.title ?? "Unknown Place",
+                subtitle: nil
+            )
+            onAnnotationTap?(poiAnnotation, tapPoint)
+            // POI stays selected while detail modal is open — deselection handled in updateUIView
         }
     }
 } 

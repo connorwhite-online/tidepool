@@ -28,10 +28,15 @@ struct MapHomeView: View {
     private let presenceReporter = PresenceReporter()
     
     // Location detail sheet
-    @State private var showingLocationDetail = false
-    @State private var selectedLocationDetail: LocationDetail?
-    @State private var detailSheetOriginPoint: CGPoint = .zero
-    @StateObject private var favoritesManager = InAppFavoritesManager()
+    @Binding var selectedLocationDetail: LocationDetail?
+    @Binding var mapCenterCoordinate: CLLocationCoordinate2D
+    @Binding var navigateToCoordinate: CLLocationCoordinate2D?
+    @Binding var searchResultPin: POIAnnotation?
+    @EnvironmentObject var favoritesManager: InAppFavoritesManager
+
+    private var searchPinAnnotations: [POIAnnotation] {
+        if let pin = searchResultPin { return [pin] } else { return [] }
+    }
 
     private var mapView: some View {
         ZStack(alignment: .center) {
@@ -40,9 +45,14 @@ struct MapHomeView: View {
                 heatOverlays: heatOverlays,
                 heatBlobGroups: heatBlobGroups,
                 highContrast: true,
-                poiAnnotations: [], // No longer using custom POI annotations
+                poiAnnotations: searchPinAnnotations,
+                isDetailShowing: selectedLocationDetail != nil,
+                navigateToCoordinate: $navigateToCoordinate,
                 onAnnotationTap: { annotation, tapPoint in
                     handleAnnotationTap(annotation: annotation, tapPoint: tapPoint)
+                },
+                onCenterChanged: { center in
+                    mapCenterCoordinate = center
                 }
             )
             .ignoresSafeArea()
@@ -91,16 +101,6 @@ struct MapHomeView: View {
             }
             .onChange(of: heatBlobGroups) { _, _ in
                 // Heat blobs updated - no need to refresh POIs as they're native
-            }
-            .sheet(isPresented: $showingLocationDetail) {
-                if let locationDetail = selectedLocationDetail {
-                    LocationDetailSheet(
-                        location: locationDetail,
-                        originPoint: detailSheetOriginPoint,
-                        isPresented: $showingLocationDetail,
-                        favoritesManager: favoritesManager
-                    )
-                }
             }
     }
 
@@ -273,35 +273,36 @@ struct MapHomeView: View {
     // MARK: - Location Detail Sheet
     
     private func handleAnnotationTap(annotation: POIAnnotation, tapPoint: CGPoint) {
-        // Convert POIAnnotation to LocationDetail
-        let locationDetail = createLocationDetail(from: annotation)
-        
-        selectedLocationDetail = locationDetail
-        detailSheetOriginPoint = tapPoint
-        showingLocationDetail = true
-        
-        // Add haptic feedback
+        selectedLocationDetail = createLocationDetail(from: annotation)
         HapticFeedbackManager.shared.impact(.light)
     }
     
     private func createLocationDetail(from annotation: POIAnnotation) -> LocationDetail {
-        // Convert POI category to our PlaceCategory
         let category = mapPOICategoryToPlaceCategory(annotation.subtitle)
-        
-        // Create a basic LocationDetail
+        let name = annotation.title ?? "Unknown Place"
+        let stablePlaceId = FavoriteLocation.stablePlaceId(name: name, coordinate: annotation.coordinate)
+        let favorite = favoritesManager.getFavorite(for: stablePlaceId)
+
+        let favoriteStatus: LocationDetail.FavoriteStatus
+        if let fav = favorite {
+            favoriteStatus = .favorited(rating: fav.rating ?? 0, notes: fav.notes)
+        } else {
+            favoriteStatus = .notFavorited
+        }
+
         return LocationDetail(
-            name: annotation.title ?? "Unknown Place",
+            name: name,
             category: category,
             coordinate: annotation.coordinate,
-            address: nil, // We don't have address from POI annotations
+            address: nil,
             phoneNumber: nil,
             website: nil,
             hours: nil,
-            images: [], // No images available from POI
-            rating: Double.random(in: 3.5...4.8), // Mock rating for demo
-            priceLevel: generateMockPriceLevel(for: category),
-            amenities: generateMockAmenities(for: category),
-            userFavoriteStatus: .notFavorited
+            images: [],
+            rating: favorite.flatMap { $0.rating }.map { Double($0) },
+            priceLevel: nil,
+            amenities: [],
+            userFavoriteStatus: favoriteStatus
         )
     }
     
@@ -338,47 +339,4 @@ struct MapHomeView: View {
         }
     }
     
-    private func generateMockPriceLevel(for category: PlaceCategory) -> LocationDetail.PriceLevel? {
-        switch category {
-        case .restaurant, .fineDining:
-            return [.moderate, .expensive].randomElement()
-        case .cafe:
-            return [.budget, .moderate].randomElement()
-        case .bar:
-            return [.moderate, .expensive].randomElement()
-        case .fastFood:
-            return .budget
-        default:
-            return nil
-        }
-    }
-    
-    private func generateMockAmenities(for category: PlaceCategory) -> [String] {
-        switch category {
-        case .restaurant, .fineDining:
-            return ["Outdoor seating", "WiFi", "Accepts credit cards", "Reservations recommended"]
-        case .cafe:
-            return ["WiFi", "Outdoor seating", "Accepts credit cards", "Laptop friendly"]
-        case .bar:
-            return ["Happy hour", "Live music", "Credit cards accepted", "Late night"]
-        case .park:
-            return ["Dog friendly", "Picnic areas", "Walking trails", "Free parking"]
-        case .shopping:
-            return ["Credit cards accepted", "Returns accepted", "Personal shopping"]
-        case .museum:
-            return ["Guided tours", "Gift shop", "Audio guide", "Student discounts"]
-        case .gym:
-            return ["Locker rooms", "Personal training", "Group classes", "Equipment rental"]
-        case .hospital:
-            return ["Emergency services", "Parking available", "Wheelchair accessible", "Insurance accepted"]
-        case .school, .library:
-            return ["Public access", "WiFi", "Study areas", "Parking available"]
-        case .gasStation:
-            return ["24/7", "Convenience store", "Car wash", "Credit cards accepted"]
-        case .bank:
-            return ["ATM", "Drive-through", "Online banking", "Safe deposit boxes"]
-        default:
-            return ["Credit cards accepted"]
-        }
-    }
 } 

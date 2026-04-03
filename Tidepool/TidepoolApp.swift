@@ -10,6 +10,8 @@ import UIKit
 
 @main
 struct TidepoolApp: App {
+    @StateObject private var favoritesManager = InAppFavoritesManager()
+
     init() {
         // UINavigationBar titles
         let navAppearance = UINavigationBarAppearance()
@@ -37,6 +39,7 @@ struct TidepoolApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .environmentObject(favoritesManager)
                 .fontDesign(.rounded)
                 .environment(\.font, .system(.body, design: .rounded))
         }

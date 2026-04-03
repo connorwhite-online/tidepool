@@ -12,7 +12,7 @@ struct ProfileView: View {
     @StateObject private var location = LocationManager()
     @StateObject private var appleMapsManager = AppleMapsIntegrationManager()
     @StateObject private var photosManager = PhotosIntegrationManager()
-    @StateObject private var favoritesManager = InAppFavoritesManager()
+    @EnvironmentObject var favoritesManager: InAppFavoritesManager
     @StateObject private var spotifyManager = SpotifyIntegrationManager()
     @StateObject private var appleMusicManager = AppleMusicIntegrationManager()
     @StateObject private var ageRangeManager = AgeRangeManager()
@@ -22,6 +22,7 @@ struct ProfileView: View {
     @State private var photosDeniedAlert = false
     @State private var showingLocationImport = false
     @State private var showingFavorites = false
+    @State private var showingPlaceSearch = false
     @State private var showingBirthdayPicker = false
     @State private var tempBirthday: Date = Calendar.current.date(byAdding: .year, value: -25, to: Date()) ?? Date()
 
@@ -46,6 +47,7 @@ struct ProfileView: View {
                 showingHomePicker: $showingHomePicker,
                 showingLocationImport: $showingLocationImport,
                 showingFavorites: $showingFavorites,
+                showingPlaceSearch: $showingPlaceSearch,
                 photosDeniedAlert: $photosDeniedAlert,
                 location: location,
                 appleMapsManager: appleMapsManager,
@@ -474,6 +476,12 @@ struct ProfileView: View {
             Label("My Favorites", systemImage: "heart.fill")
                 .foregroundStyle(.red)
             Spacer()
+            Button {
+                showingPlaceSearch = true
+            } label: {
+                Image(systemName: "plus")
+            }
+            .buttonStyle(.bordered)
             Button("View All") {
                 showingFavorites = true
             }
@@ -598,6 +606,7 @@ struct ProfileSheetsModifier: ViewModifier {
     @Binding var showingHomePicker: Bool
     @Binding var showingLocationImport: Bool
     @Binding var showingFavorites: Bool
+    @Binding var showingPlaceSearch: Bool
     @Binding var photosDeniedAlert: Bool
     let location: LocationManager
     let appleMapsManager: AppleMapsIntegrationManager
@@ -615,6 +624,10 @@ struct ProfileSheetsModifier: ViewModifier {
             }
             .sheet(isPresented: $showingFavorites) {
                 FavoritesListView(favoritesManager: favoritesManager)
+            }
+            .sheet(isPresented: $showingPlaceSearch) {
+                PlaceSearchView()
+                    .environmentObject(favoritesManager)
             }
             .alert("Photos Access Required", isPresented: $photosDeniedAlert) {
                 Button("Cancel", role: .cancel) {}
@@ -688,4 +701,5 @@ struct BirthdayPickerSheet: View {
 
 #Preview {
     ProfileView()
+        .environmentObject(InAppFavoritesManager())
 }

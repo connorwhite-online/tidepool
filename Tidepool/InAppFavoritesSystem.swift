@@ -10,19 +10,26 @@ struct FavoriteLocation: Identifiable, Codable {
     let name: String
     let category: PlaceCategory
     let coordinate: CLLocationCoordinate2D
-    let rating: Int // 1-5 scale
+    let rating: Int? // 1-5 scale, nil for quick-favorited places
     let notes: String?
     let createdAt: Date
     let lastVisited: Date?
     let visitCount: Int
     let tags: [String]
-    
+
     enum CodingKeys: String, CodingKey {
         case id, placeId, name, category, rating, notes, createdAt, lastVisited, visitCount, tags
         case latitude, longitude
     }
-    
-    init(placeId: String, name: String, category: PlaceCategory, coordinate: CLLocationCoordinate2D, rating: Int, notes: String? = nil, tags: [String] = []) {
+
+    /// Generate a stable place ID from name and coordinate so the same physical place always maps to the same ID
+    static func stablePlaceId(name: String, coordinate: CLLocationCoordinate2D) -> String {
+        let lat = String(format: "%.5f", coordinate.latitude)
+        let lon = String(format: "%.5f", coordinate.longitude)
+        return "\(name)_\(lat)_\(lon)"
+    }
+
+    init(placeId: String, name: String, category: PlaceCategory, coordinate: CLLocationCoordinate2D, rating: Int? = nil, notes: String? = nil, tags: [String] = []) {
         self.id = UUID()
         self.placeId = placeId
         self.name = name
@@ -35,32 +42,32 @@ struct FavoriteLocation: Identifiable, Codable {
         self.visitCount = 1
         self.tags = tags
     }
-    
+
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(UUID.self, forKey: .id)
         placeId = try container.decode(String.self, forKey: .placeId)
         name = try container.decode(String.self, forKey: .name)
         category = try container.decode(PlaceCategory.self, forKey: .category)
-        rating = try container.decode(Int.self, forKey: .rating)
+        rating = try container.decodeIfPresent(Int.self, forKey: .rating)
         notes = try container.decodeIfPresent(String.self, forKey: .notes)
         createdAt = try container.decode(Date.self, forKey: .createdAt)
         lastVisited = try container.decodeIfPresent(Date.self, forKey: .lastVisited)
         visitCount = try container.decode(Int.self, forKey: .visitCount)
         tags = try container.decode([String].self, forKey: .tags)
-        
+
         let latitude = try container.decode(Double.self, forKey: .latitude)
         let longitude = try container.decode(Double.self, forKey: .longitude)
         coordinate = CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
     }
-    
+
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(id, forKey: .id)
         try container.encode(placeId, forKey: .placeId)
         try container.encode(name, forKey: .name)
         try container.encode(category, forKey: .category)
-        try container.encode(rating, forKey: .rating)
+        try container.encodeIfPresent(rating, forKey: .rating)
         try container.encodeIfPresent(notes, forKey: .notes)
         try container.encode(createdAt, forKey: .createdAt)
         try container.encodeIfPresent(lastVisited, forKey: .lastVisited)
@@ -69,16 +76,16 @@ struct FavoriteLocation: Identifiable, Codable {
         try container.encode(coordinate.latitude, forKey: .latitude)
         try container.encode(coordinate.longitude, forKey: .longitude)
     }
-    
+
     /// Get interest weight based on rating, visit count, and recency
     var interestWeight: Double {
-        let ratingWeight = Double(rating) / 5.0
+        let ratingWeight = Double(rating ?? 3) / 5.0
         let visitWeight = min(Double(visitCount) / 10.0, 1.0) // Cap at 10 visits
         let recencyWeight = recencyScore()
-        
+
         return (ratingWeight * 0.5) + (visitWeight * 0.3) + (recencyWeight * 0.2)
     }
-    
+
     private func recencyScore() -> Double {
         let daysSinceCreated = Date().timeIntervalSince(createdAt) / (24 * 60 * 60)
         // Decay function: newer favorites have higher weight
@@ -124,7 +131,7 @@ class InAppFavoritesManager: ObservableObject {
             case .recentlyAdded:
                 return favorites.sorted { $0.createdAt > $1.createdAt }
             case .highestRated:
-                return favorites.sorted { $0.rating > $1.rating }
+                return favorites.sorted { ($0.rating ?? 0) > ($1.rating ?? 0) }
             case .mostVisited:
                 return favorites.sorted { $0.visitCount > $1.visitCount }
             case .alphabetical:
@@ -159,7 +166,10 @@ class InAppFavoritesManager: ObservableObject {
         return sortOrder.sort(filtered)
     }
     
-    func addFavorite(placeId: String, name: String, category: PlaceCategory, coordinate: CLLocationCoordinate2D, rating: Int, notes: String? = nil, tags: [String] = []) {
+    func addFavorite(placeId: String, name: String, category: PlaceCategory, coordinate: CLLocationCoordinate2D, rating: Int? = nil, notes: String? = nil, tags: [String] = []) {
+        // Don't add duplicates
+        guard !isFavorited(placeId) else { return }
+
         let favorite = FavoriteLocation(
             placeId: placeId,
             name: name,
@@ -169,12 +179,17 @@ class InAppFavoritesManager: ObservableObject {
             notes: notes,
             tags: tags
         )
-        
+
         favorites.append(favorite)
         saveFavorites()
-        
-        // Haptic feedback for successful addition
+
         HapticFeedbackManager.shared.notification(.success)
+    }
+
+    /// Quick-favorite a place with just name, category, and coordinate (no rating required)
+    func quickFavorite(name: String, category: PlaceCategory, coordinate: CLLocationCoordinate2D) {
+        let placeId = FavoriteLocation.stablePlaceId(name: name, coordinate: coordinate)
+        addFavorite(placeId: placeId, name: name, category: category, coordinate: coordinate)
     }
     
     func removeFavorite(for placeId: String) {
@@ -248,7 +263,7 @@ class InAppFavoritesManager: ObservableObject {
             }
             
             // Add rating-based tags
-            if favorite.rating >= 4 {
+            if (favorite.rating ?? 0) >= 4 {
                 tagCounts["highly_rated", default: 0] += weight
             }
         }
@@ -259,7 +274,8 @@ class InAppFavoritesManager: ObservableObject {
     /// Get stats for profile display
     func getStats() -> FavoriteStats {
         let totalFavorites = favorites.count
-        let averageRating = favorites.isEmpty ? 0.0 : Double(favorites.map { $0.rating }.reduce(0, +)) / Double(favorites.count)
+        let ratedFavorites = favorites.compactMap { $0.rating }
+        let averageRating = ratedFavorites.isEmpty ? 0.0 : Double(ratedFavorites.reduce(0, +)) / Double(ratedFavorites.count)
         let categoryCounts = Dictionary(grouping: favorites, by: { $0.category })
             .mapValues { $0.count }
         let topCategory = categoryCounts.max(by: { $0.value < $1.value })?.key
@@ -454,15 +470,17 @@ struct FavoriteRowView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                     
                     HStack(spacing: 8) {
-                        // Rating stars
-                        HStack(spacing: 2) {
-                            ForEach(1...5, id: \.self) { star in
-                                Image(systemName: star <= favorite.rating ? "star.fill" : "star")
-                                    .font(.caption)
-                                    .foregroundStyle(star <= favorite.rating ? .yellow : .secondary)
+                        // Rating stars (if rated)
+                        if let rating = favorite.rating {
+                            HStack(spacing: 2) {
+                                ForEach(1...5, id: \.self) { star in
+                                    Image(systemName: star <= rating ? "star.fill" : "star")
+                                        .font(.caption)
+                                        .foregroundStyle(star <= rating ? .yellow : .secondary)
+                                }
                             }
                         }
-                        
+
                         Text(favorite.category.displayName)
                             .font(.caption)
                             .foregroundStyle(.secondary)
