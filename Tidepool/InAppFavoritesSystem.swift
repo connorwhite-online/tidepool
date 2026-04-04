@@ -1,6 +1,7 @@
 import Foundation
 import CoreLocation
 import SwiftUI
+import TidepoolShared
 
 // MARK: - Favorite Location Data Model
 
@@ -118,6 +119,9 @@ class InAppFavoritesManager: ObservableObject {
     
     private let userDefaults = UserDefaults.standard
     private let favoritesKey = "in_app_favorites"
+    private let serverIDsKey = "favorites_server_ids"
+    /// Maps local placeId → server-side UUID string for efficient deletes
+    private var serverIDMap: [String: String] = [:]
     
     enum SortOrder: String, CaseIterable {
         case recentlyAdded = "Recently Added"
@@ -144,6 +148,8 @@ class InAppFavoritesManager: ObservableObject {
     
     init() {
         loadFavorites()
+        loadServerIDMap()
+        reconcileWithBackend()
     }
     
     var filteredAndSortedFavorites: [FavoriteLocation] {
@@ -182,6 +188,7 @@ class InAppFavoritesManager: ObservableObject {
 
         favorites.append(favorite)
         saveFavorites()
+        syncAddToBackend(favorite)
 
         HapticFeedbackManager.shared.notification(.success)
     }
@@ -193,9 +200,11 @@ class InAppFavoritesManager: ObservableObject {
     }
     
     func removeFavorite(for placeId: String) {
+        let removed = favorites.first { $0.placeId == placeId }
         favorites.removeAll { $0.placeId == placeId }
         saveFavorites()
-        
+        if let removed { syncDeleteFromBackend(removed) }
+
         // Haptic feedback for removal
         HapticFeedbackManager.shared.impact(.medium)
     }
@@ -288,6 +297,100 @@ class InAppFavoritesManager: ObservableObject {
         )
     }
     
+    // MARK: - Backend Sync
+
+    /// Reconcile local favorites with server on launch.
+    func reconcileWithBackend() {
+        guard BackendClient.shared.isAuthenticated else { return }
+        Task {
+            do {
+                let remote = try await BackendClient.shared.getFavorites()
+                let localIDs = Set(favorites.map { $0.placeId })
+                let remoteIDs = Set(remote.map { $0.placeID })
+
+                // Cache all server IDs
+                for remoteFav in remote {
+                    serverIDMap[remoteFav.placeID] = remoteFav.id
+                }
+                saveServerIDMap()
+
+                // Upload local favorites missing from server
+                for fav in favorites where !remoteIDs.contains(fav.placeId) {
+                    syncAddToBackend(fav)
+                }
+
+                // Download server favorites missing locally
+                for remoteFav in remote where !localIDs.contains(remoteFav.placeID) {
+                    let localCategory = PlaceCategory(rawValue: remoteFav.category.rawValue) ?? .other
+                    let local = FavoriteLocation(
+                        placeId: remoteFav.placeID,
+                        name: remoteFav.name,
+                        category: localCategory,
+                        coordinate: CLLocationCoordinate2D(latitude: 0, longitude: 0),
+                        rating: remoteFav.rating
+                    )
+                    favorites.append(local)
+                }
+                saveFavorites()
+            } catch {
+                print("[FavoritesSync] reconcile failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func syncAddToBackend(_ favorite: FavoriteLocation) {
+        guard BackendClient.shared.isAuthenticated else { return }
+        Task {
+            do {
+                let sharedCategory = TidepoolShared.PlaceCategory(rawValue: favorite.category.rawValue) ?? .other
+                let request = FavoriteRequest(
+                    placeID: favorite.placeId,
+                    yelpID: nil,
+                    name: favorite.name,
+                    category: sharedCategory,
+                    latitude: favorite.coordinate.latitude,
+                    longitude: favorite.coordinate.longitude,
+                    rating: favorite.rating
+                )
+                let response = try await BackendClient.shared.addFavorite(request)
+                serverIDMap[favorite.placeId] = response.id
+                saveServerIDMap()
+            } catch {
+                print("[FavoritesSync] add failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func syncDeleteFromBackend(_ favorite: FavoriteLocation) {
+        guard BackendClient.shared.isAuthenticated else { return }
+        Task {
+            do {
+                if let serverID = serverIDMap[favorite.placeId] {
+                    try await BackendClient.shared.deleteFavorite(id: serverID)
+                    serverIDMap.removeValue(forKey: favorite.placeId)
+                    saveServerIDMap()
+                }
+            } catch {
+                print("[FavoritesSync] delete failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    // MARK: - Server ID Map Persistence
+
+    private func loadServerIDMap() {
+        guard let data = userDefaults.data(forKey: serverIDsKey),
+              let map = try? JSONDecoder().decode([String: String].self, from: data) else { return }
+        serverIDMap = map
+    }
+
+    private func saveServerIDMap() {
+        guard let data = try? JSONEncoder().encode(serverIDMap) else { return }
+        userDefaults.set(data, forKey: serverIDsKey)
+    }
+
+    // MARK: - Local Persistence
+
     private func loadFavorites() {
         guard let data = userDefaults.data(forKey: favoritesKey),
               let loadedFavorites = try? JSONDecoder().decode([FavoriteLocation].self, from: data) else {

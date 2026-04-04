@@ -1,0 +1,15 @@
+# Swift Package Manager
+TidepoolServer/.build/
+TidepoolServer/.swiftpm/
+
+# Xcode
+*.xcuserstate
+xcuserdata/
+DerivedData/
+*.xcscmblueprint
+
+# macOS
+.DS_Store
+
+# Environment
+.env

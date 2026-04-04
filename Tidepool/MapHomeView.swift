@@ -1,6 +1,7 @@
 import SwiftUI
 import MapKit
 import CoreLocation
+import TidepoolShared
 
 struct PresenceCircleOverlay: Identifiable {
     let id = UUID()
@@ -14,7 +15,8 @@ struct MapHomeView: View {
     @State private var heatOverlays: [HeatCircleOverlay] = []
     @State private var heatBlobGroups: [HeatBlobGroup] = []
     // POI annotations are now handled natively by MapKit
-    @State private var mockSpotsLoaded: Bool = false
+    @State private var heatFetchTask: Task<Void, Never>?
+    @State private var lastFetchedTileSet: Set<String> = []
     // Hysteresis thresholds to prevent rapid toggling near boundary
     private let homeHideInnerRadiusMeters: CLLocationDistance = 137.16 // 450 ft
     private let homeShowOuterRadiusMeters: CLLocationDistance = 167.64 // 550 ft
@@ -53,21 +55,12 @@ struct MapHomeView: View {
                 },
                 onCenterChanged: { center in
                     mapCenterCoordinate = center
+                },
+                onRegionChanged: { region in
+                    debouncedFetchHeatTiles(region: region)
                 }
             )
             .ignoresSafeArea()
-
-            if heatBlobGroups.isEmpty {
-                VStack(spacing: 8) {
-                    Image(systemName: "map")
-                        .font(.largeTitle)
-                        .foregroundStyle(.secondary)
-                    Text("Explore hotspots nearby")
-                        .foregroundStyle(.secondary)
-                }
-                .padding(12)
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-            }
         }
         .overlay(alignment: .bottomTrailing) {
             if showTileHUD {
@@ -82,25 +75,17 @@ struct MapHomeView: View {
         mapView
             .onAppear {
                 location.requestAuthorization()
-                if !mockSpotsLoaded {
-                    loadMockHeatSpots()
-                    mockSpotsLoaded = true
-                }
                 updatePresenceOverlay()
                 updateTileId()
-                // POIs are now handled natively by MapKit
                 presenceReporter.start(using: location)
             }
             .onDisappear {
                 presenceReporter.stop()
+                heatFetchTask?.cancel()
             }
             .onChange(of: location.latestLocation) { _, _ in
                 updatePresenceOverlay()
                 updateTileId()
-                // POIs are now handled natively by MapKit
-            }
-            .onChange(of: heatBlobGroups) { _, _ in
-                // Heat blobs updated - no need to refresh POIs as they're native
             }
     }
 
@@ -179,95 +164,86 @@ struct MapHomeView: View {
         return la.distance(from: lb)
     }
 
-    // MARK: - Mock Heat Spots (Search -> Geocode -> Hardcoded fallback)
+    // MARK: - Heat Tile Fetching
 
-    private func loadMockHeatSpots() {
-        let spots: [(name: String, query: String, baseIntensity: CGFloat)] = [
-            ("Erewhon Silver Lake", "Erewhon 4121 Santa Monica Blvd, Los Angeles, CA 90029", 0.85),
-            ("Seco Silverlake", "Seco 3820 W Sunset Blvd, Los Angeles, CA 90026", 0.75),
-            ("Bar Sinitzki", "Bar Sinitzki 3147 Glendale Blvd, Los Angeles, CA 90039", 0.70)
-        ]
-
-        // Hardcoded fallbacks (approximate)
-        let fallbackCoords: [String: CLLocationCoordinate2D] = [
-            "Erewhon Silver Lake": CLLocationCoordinate2D(latitude: 34.0909, longitude: -118.2826),
-            "Seco Silverlake": CLLocationCoordinate2D(latitude: 34.0928, longitude: -118.2829),
-            "Bar Sinitzki": CLLocationCoordinate2D(latitude: 34.1159, longitude: -118.2604)
-        ]
-
-        // Per-user radius ~40 m
-        let circleRadiusMeters: CLLocationDistance = 40
-
-        // Deterministic jitter pattern (metersNorth, metersEast, intensityScale)
-        let jitter: [(Double, Double, CGFloat)] = [
-            (0,    0,    1.00),
-            (8,    5,    0.85),
-            (-10,  12,   0.78),
-            (15,   -6,   0.70),
-            (-14,  -9,   0.72),
-            (22,   3,    0.60),
-            (-6,   18,   0.65),
-            (5,    -16,  0.68),
-            (12,   -12,  0.62),
-            (-18,  7,    0.58)
-        ]
-
-        var groups: [HeatBlobGroup] = []
-        let group = DispatchGroup()
-
-        let searchRegion: MKCoordinateRegion = {
-            if let userLoc = location.latestLocation?.coordinate {
-                return MKCoordinateRegion(center: userLoc, span: MKCoordinateSpan(latitudeDelta: 0.15, longitudeDelta: 0.15))
-            } else {
-                // Default to Silver Lake/Atwater vicinity
-                return MKCoordinateRegion(center: CLLocationCoordinate2D(latitude: 34.096, longitude: -118.273), span: MKCoordinateSpan(latitudeDelta: 0.18, longitudeDelta: 0.18))
-            }
-        }()
-
-        let geocoder = CLGeocoder()
-
-        for spot in spots {
-            group.enter()
-            let request = MKLocalSearch.Request()
-            request.naturalLanguageQuery = spot.query
-            request.region = searchRegion
-            MKLocalSearch(request: request).start { response, _ in
-                let baseCoord: CLLocationCoordinate2D? = response?.mapItems.first?.placemark.location?.coordinate
-                    ?? fallbackCoords[spot.name]
-
-                if let c = baseCoord {
-                    let pts: [CLLocationCoordinate2D] = jitter.map { j in
-                        offsetCoordinate(from: c, metersNorth: j.0, metersEast: j.1)
-                    }
-                    groups.append(HeatBlobGroup(points: pts, baseIntensity: spot.baseIntensity, perUserRadiusMeters: circleRadiusMeters))
-                    group.leave()
-                } else {
-                    geocoder.geocodeAddressString(spot.query) { placemarks, _ in
-                        let gc = placemarks?.first?.location?.coordinate ?? fallbackCoords[spot.name]
-                        if let c = gc {
-                            let pts: [CLLocationCoordinate2D] = jitter.map { j in
-                                offsetCoordinate(from: c, metersNorth: j.0, metersEast: j.1)
-                            }
-                            groups.append(HeatBlobGroup(points: pts, baseIntensity: spot.baseIntensity, perUserRadiusMeters: circleRadiusMeters))
-                        }
-                        group.leave()
-                    }
-                }
-            }
-        }
-
-        group.notify(queue: .main) {
-            heatBlobGroups = groups
-            heatOverlays = [] // no per-point circles needed when using blob
-            // POIs are now handled natively by MapKit
+    private func debouncedFetchHeatTiles(region: MKCoordinateRegion) {
+        heatFetchTask?.cancel()
+        heatFetchTask = Task {
+            try? await Task.sleep(nanoseconds: 500_000_000) // 0.5s debounce
+            guard !Task.isCancelled else { return }
+            await fetchHeatTiles(region: region)
         }
     }
 
-    private func offsetCoordinate(from base: CLLocationCoordinate2D, metersNorth: Double, metersEast: Double) -> CLLocationCoordinate2D {
+    private func fetchHeatTiles(region: MKCoordinateRegion) async {
+        let sw = Coordinate(
+            latitude: region.center.latitude - region.span.latitudeDelta / 2,
+            longitude: region.center.longitude - region.span.longitudeDelta / 2
+        )
+        let ne = Coordinate(
+            latitude: region.center.latitude + region.span.latitudeDelta / 2,
+            longitude: region.center.longitude + region.span.longitudeDelta / 2
+        )
+
+        // Skip if the viewport covers the same corner tiles as last fetch
+        let swTile = Tiling.current.tileIdString(for: CLLocationCoordinate2D(latitude: sw.latitude, longitude: sw.longitude))
+        let neTile = Tiling.current.tileIdString(for: CLLocationCoordinate2D(latitude: ne.latitude, longitude: ne.longitude))
+        let tileSet: Set<String> = [swTile, neTile]
+        guard tileSet != lastFetchedTileSet else { return }
+        lastFetchedTileSet = tileSet
+
+        let request = HeatTileRequest(
+            viewport: Viewport(ne: ne, sw: sw),
+            viewerVector: nil
+        )
+
+        do {
+            let response = try await BackendClient.shared.fetchHeatTiles(request)
+            let groups = response.tiles.compactMap { tile -> HeatBlobGroup? in
+                guard let center = coordinateFromTileID(tile.tileID) else { return nil }
+                let points = syntheticPoints(around: center, count: tile.contributorCount)
+                return HeatBlobGroup(
+                    points: points,
+                    baseIntensity: CGFloat(tile.intensity),
+                    perUserRadiusMeters: 40
+                )
+            }
+            heatBlobGroups = groups
+        } catch {
+            print("[MapHomeView] heat tile fetch failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// Parse a tile ID string like "grid_150_m_X_Y" back to its center coordinate.
+    private func coordinateFromTileID(_ tileID: String) -> CLLocationCoordinate2D? {
+        let parts = tileID.split(separator: "_")
+        // Expected format: grid_150_m_X_Y
+        guard parts.count == 5,
+              let metersPerTile = Int(parts[1]),
+              let x = Int(parts[3]),
+              let y = Int(parts[4]) else { return nil }
+
+        let latMeters = 111_000.0
+        let dLat = Double(metersPerTile) / latMeters
+        // Center of tile
+        let lat = (Double(y) + 0.5) * dLat - 90.0
+        let lonMeters = latMeters * cos(lat * .pi / 180)
+        let dLon = Double(metersPerTile) / lonMeters
+        let lon = (Double(x) + 0.5) * dLon - 180.0
+        return CLLocationCoordinate2D(latitude: lat, longitude: lon)
+    }
+
+    /// Generate jittered points around a center to give heat blobs an organic look.
+    private func syntheticPoints(around center: CLLocationCoordinate2D, count: Int) -> [CLLocationCoordinate2D] {
+        let clamped = min(max(count, 3), 15)
         let metersPerDegreeLat = 111_000.0
-        let deltaLat = metersNorth / metersPerDegreeLat
-        let deltaLon = metersEast / (metersPerDegreeLat * cos(base.latitude * .pi / 180))
-        return CLLocationCoordinate2D(latitude: base.latitude + deltaLat, longitude: base.longitude + deltaLon)
+        return (0..<clamped).map { i in
+            let angle = Double(i) * (2 * .pi / Double(clamped)) + Double.random(in: -0.3...0.3)
+            let radius = Double.random(in: 5...30)
+            let dLat = radius * cos(angle) / metersPerDegreeLat
+            let dLon = radius * sin(angle) / (metersPerDegreeLat * cos(center.latitude * .pi / 180))
+            return CLLocationCoordinate2D(latitude: center.latitude + dLat, longitude: center.longitude + dLon)
+        }
     }
     
     // MARK: - Location Detail Sheet

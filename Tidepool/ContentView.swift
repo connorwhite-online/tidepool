@@ -8,6 +8,7 @@
 import SwiftUI
 import MapKit
 import UIKit
+import TidepoolShared
 
 struct ContentView: View {
     @AppStorage("has_onboarded") private var hasOnboarded: Bool = false
@@ -240,6 +241,7 @@ struct MapSearchSheet: View {
     @State private var searchResults: [MKMapItem] = []
     @State private var isSearching = false
     @State private var showingSuggestions = true
+    @State private var suppressNextSearchChange = false
     @FocusState private var isFieldFocused: Bool
 
     /// User's current location for distance display, falls back to map center
@@ -312,7 +314,6 @@ struct MapSearchSheet: View {
                 HStack(spacing: 8) {
                     ForEach(categories, id: \.label) { cat in
                         Button {
-                            searchText = cat.label
                             performCategorySearch(poiCategories: cat.poiCategories, label: cat.label)
                         } label: {
                             Label(cat.label, systemImage: cat.icon)
@@ -480,6 +481,10 @@ struct MapSearchSheet: View {
             )
         }
         .onChange(of: searchText) { _, newValue in
+            if suppressNextSearchChange {
+                suppressNextSearchChange = false
+                return
+            }
             showingSuggestions = true
             searchCompleter.search(newValue)
         }
@@ -506,6 +511,8 @@ struct MapSearchSheet: View {
         isSearching = true
         showingSuggestions = false
         searchCompleter.clear()
+        suppressNextSearchChange = true
+        searchText = label
         isFieldFocused = false
 
         // Use MKLocalPointsOfInterestRequest for pure category filtering (no text matching)
@@ -543,28 +550,90 @@ struct MapSearchSheet: View {
 
 // MARK: - For You Recommendation Loader
 
+@MainActor
 final class ForYouRecommendationLoader: ObservableObject {
     @Published var recommendations: [MKMapItem] = []
+    @Published var serverResults: [PlaceSearchResult] = []
     @Published var isLoading = false
 
-    /// Derive search queries from the user's favorite categories, then search nearby
+    /// Load recommendations — tries server-backed blended search first, falls back to local MapKit.
     func loadRecommendations(favorites: [FavoriteLocation], near center: CLLocationCoordinate2D) {
         guard !favorites.isEmpty else { return }
         isLoading = true
 
-        // Count favorite categories to find user's top preferences
+        // Try server first if authenticated
+        if BackendClient.shared.isAuthenticated {
+            loadFromServer(favorites: favorites, near: center)
+        } else {
+            loadFromMapKit(favorites: favorites, near: center)
+        }
+    }
+
+    // MARK: - Server-backed (blended scoring)
+
+    private func loadFromServer(favorites: [FavoriteLocation], near center: CLLocationCoordinate2D) {
+        // Build queries from top favorite categories
+        var categoryCounts: [PlaceCategory: Int] = [:]
+        for fav in favorites {
+            categoryCounts[fav.category, default: 0] += 1
+        }
+        let topCategory = categoryCounts.sorted { $0.value > $1.value }.first?.key ?? .restaurant
+        let queryMap: [PlaceCategory: String] = [
+            .restaurant: "restaurant", .cafe: "coffee cafe", .bar: "bar cocktails",
+            .park: "park outdoor", .shopping: "shop boutique", .gym: "fitness gym",
+            .museum: "museum gallery", .library: "bookstore", .nightclub: "nightlife",
+        ]
+        let query = queryMap[topCategory] ?? "things to do"
+
+        Task { @MainActor in
+            do {
+                let request = PlaceSearchRequest(
+                    query: query,
+                    location: Coordinate(latitude: center.latitude, longitude: center.longitude),
+                    radiusKm: 5.0,
+                    limit: 12
+                )
+                let response = try await BackendClient.shared.searchPlaces(request)
+
+                // Filter out already-favorited places
+                let favIDs = Set(favorites.map { $0.placeId })
+                let filtered = response.results.filter { result in
+                    let pid = "\(result.name)_\(String(format: "%.5f", result.location.latitude))_\(String(format: "%.5f", result.location.longitude))"
+                    return !favIDs.contains(pid)
+                }
+
+                self.serverResults = Array(filtered.prefix(12))
+                // Also create MKMapItems for compatibility with existing card UI
+                self.recommendations = filtered.prefix(12).map { result in
+                    let placemark = MKPlacemark(coordinate: CLLocationCoordinate2D(
+                        latitude: result.location.latitude,
+                        longitude: result.location.longitude
+                    ))
+                    let item = MKMapItem(placemark: placemark)
+                    item.name = result.name
+                    return item
+                }
+                self.isLoading = false
+            } catch {
+                print("[ForYou] server search failed, falling back to MapKit: \(error.localizedDescription)")
+                loadFromMapKit(favorites: favorites, near: center)
+            }
+        }
+    }
+
+    // MARK: - Local MapKit fallback
+
+    private func loadFromMapKit(favorites: [FavoriteLocation], near center: CLLocationCoordinate2D) {
         var categoryCounts: [PlaceCategory: Int] = [:]
         for fav in favorites {
             categoryCounts[fav.category, default: 0] += 1
         }
 
-        // Get top 3 categories the user favorites most
         let topCategories = categoryCounts
             .sorted { $0.value > $1.value }
             .prefix(3)
             .map { $0.key }
 
-        // Map categories to search queries (related but not identical to what they already have)
         let queryMap: [PlaceCategory: String] = [
             .restaurant: "restaurant food dining",
             .cafe: "coffee tea cafe bakery",
@@ -584,9 +653,7 @@ final class ForYouRecommendationLoader: ObservableObject {
             return
         }
 
-        // Collect favorite place IDs to exclude them from recommendations
         let favoritePlaceIds = Set(favorites.map { $0.placeId })
-
         let group = DispatchGroup()
         var allItems: [MKMapItem] = []
         let lock = NSLock()
@@ -612,19 +679,16 @@ final class ForYouRecommendationLoader: ObservableObject {
         }
 
         group.notify(queue: .main) {
-            // Deduplicate by name, exclude already-favorited places, sort by distance
             var seen = Set<String>()
             let center = CLLocation(latitude: center.latitude, longitude: center.longitude)
 
             let filtered = allItems
                 .filter { item in
                     guard let name = item.name else { return false }
-                    // Exclude already-favorited
                     if let coord = item.placemark.location?.coordinate {
                         let pid = FavoriteLocation.stablePlaceId(name: name, coordinate: coord)
                         if favoritePlaceIds.contains(pid) { return false }
                     }
-                    // Deduplicate
                     if seen.contains(name) { return false }
                     seen.insert(name)
                     return true

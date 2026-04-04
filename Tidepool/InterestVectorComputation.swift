@@ -1,6 +1,7 @@
 import Foundation
 import CoreLocation
 import SwiftUI
+import TidepoolShared
 
 // MARK: - Interest Vector Computation System
 
@@ -17,55 +18,8 @@ class InterestVectorManager: ObservableObject {
     private let appleMusicManager: AppleMusicIntegrationManager?
     private let ageRangeManager: AgeRangeManager?
 
-    // Canonical vocabulary for interest tags (expanded with music genres)
-    private let vocabulary = [
-        // Venue types
-        "dining", "restaurant", "cafe", "coffee", "bar", "nightlife", "fast_food",
-        "fine_dining", "bakery", "grocery", "shopping", "mall", "bookstore",
-        "wine_bar", "craft_beer", "cocktails", "brewery",
-
-        // Activities & Recreation
-        "outdoor", "nature", "park", "beach", "hiking", "fitness", "gym", "sports",
-        "entertainment", "movies", "theater", "museum", "culture", "arts",
-        "music", "live_music", "concerts",
-
-        // Social & Lifestyle
-        "social", "casual", "work", "study", "quiet", "family_friendly",
-        "romantic", "business", "networking", "date_night", "all_ages",
-
-        // Characteristics
-        "convenient", "trendy", "local", "tourist", "hidden_gem", "popular",
-        "affordable", "upscale", "budget", "luxury", "good_value",
-
-        // Services & Amenities
-        "wifi", "parking", "takeout", "delivery", "reservations", "pet_friendly",
-        "accessible", "outdoor_seating", "drive_through",
-
-        // Time & Frequency
-        "daily", "weekly", "special_occasion", "regular", "frequent", "occasional",
-
-        // Quality indicators
-        "highly_rated", "recommended", "favorite", "must_visit", "avoid",
-
-        // Mood & Context
-        "relaxing", "energetic", "productive", "creative", "inspiring",
-        "comfortable", "atmospheric", "cozy", "modern", "traditional",
-
-        // Music Genres
-        "rock", "pop", "hip_hop", "rap", "electronic", "dance", "jazz", "blues",
-        "classical", "country", "folk", "metal", "r_and_b", "soul", "funk",
-        "reggae", "latin", "world", "indie", "alternative", "punk", "ambient",
-
-        // Music Sub-genres
-        "house", "techno", "trance", "dubstep", "trap", "lofi", "synthwave",
-
-        // Music Styles / Vibes
-        "acoustic", "instrumental", "vocal", "orchestral", "chill", "upbeat",
-        "melancholic", "experimental", "progressive", "classic", "retro",
-
-        // Music Activities
-        "party", "workout", "mainstream", "underground"
-    ]
+    // Canonical vocabulary shared between client and server (from TidepoolShared)
+    private let vocabulary = InterestVocabulary.tags
     
     enum VectorQuality {
         case poor      // 0-25% data coverage
@@ -116,8 +70,38 @@ class InterestVectorManager: ObservableObject {
         currentVector = vectorFromTags(allTags)
         vectorQuality = assessVectorQuality(allTags)
         lastUpdated = Date()
-        
+
         saveVector()
+        uploadVectorToServer()
+    }
+
+    /// Upload the computed vector to the backend for cross-device sync and similarity search.
+    private func uploadVectorToServer() {
+        guard !currentVector.isEmpty else { return }
+
+        let qualityString: String
+        switch vectorQuality {
+        case .poor: qualityString = "poor"
+        case .fair: qualityString = "fair"
+        case .good: qualityString = "good"
+        case .excellent: qualityString = "excellent"
+        }
+
+        let request = ProfileVectorRequest(
+            vector: currentVector,
+            quality: qualityString,
+            activeSources: getActiveDataSources()
+        )
+
+        Task {
+            do {
+                let _ = try await BackendClient.shared.uploadVector(request)
+                print("[InterestVectorManager] Vector uploaded to server (v\(currentVector.count) dims)")
+            } catch {
+                // Non-fatal — local vector is still saved
+                print("[InterestVectorManager] Server upload failed: \(error.localizedDescription)")
+            }
+        }
     }
     
     private func aggregateTagsFromAllSources() -> [String: Float] {

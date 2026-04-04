@@ -145,12 +145,27 @@ private struct LocationDetailContent: View {
     @ObservedObject var favoritesManager: InAppFavoritesManager
     let onDismiss: () -> Void
 
+    @State private var enrichment: YelpEnrichmentManager.YelpEnrichment?
+    @State private var isLoadingEnrichment = false
+
     private var stablePlaceId: String {
         FavoriteLocation.stablePlaceId(name: location.name, coordinate: location.coordinate)
     }
 
     private var isFavorited: Bool {
         favoritesManager.isFavorited(stablePlaceId)
+    }
+
+    private var displayRating: Double? {
+        enrichment?.rating ?? location.rating
+    }
+
+    private var displayPrice: LocationDetail.PriceLevel? {
+        enrichment?.price ?? location.priceLevel
+    }
+
+    private var displayIsOpen: Bool? {
+        enrichment?.isOpenNow
     }
 
     var body: some View {
@@ -161,6 +176,36 @@ private struct LocationDetailContent: View {
                 .frame(width: 36, height: 5)
                 .frame(maxWidth: .infinity)
                 .padding(.top, 14)
+
+            // Photos carousel (from Yelp)
+            if let photos = enrichment?.photos, !photos.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(photos.prefix(5), id: \.url) { photo in
+                            AsyncImage(url: photo.url) { phase in
+                                switch phase {
+                                case .success(let image):
+                                    image
+                                        .resizable()
+                                        .aspectRatio(contentMode: .fill)
+                                        .frame(width: 140, height: 100)
+                                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                                case .failure:
+                                    RoundedRectangle(cornerRadius: 10)
+                                        .fill(.quaternary)
+                                        .frame(width: 140, height: 100)
+                                default:
+                                    RoundedRectangle(cornerRadius: 10)
+                                        .fill(.quaternary)
+                                        .frame(width: 140, height: 100)
+                                        .overlay(ProgressView().tint(.secondary))
+                                }
+                            }
+                        }
+                    }
+                }
+                .frame(height: 100)
+            }
 
             // Name + category + star
             HStack(alignment: .firstTextBaseline, spacing: 12) {
@@ -177,13 +222,47 @@ private struct LocationDetailContent: View {
                         Text(location.category.displayName)
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
+
+                        // Rating + Price + Open status
+                        if let rating = displayRating {
+                            Text("·")
+                                .foregroundStyle(.tertiary)
+                            HStack(spacing: 2) {
+                                Image(systemName: "star.fill")
+                                    .font(.caption2)
+                                    .foregroundStyle(.yellow)
+                                Text(String(format: "%.1f", rating))
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+
+                        if let price = displayPrice {
+                            Text(price.rawValue)
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
                     }
 
-                    if let address = location.address {
-                        Text(address)
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
-                            .lineLimit(1)
+                    HStack(spacing: 6) {
+                        if let isOpen = displayIsOpen {
+                            Text(isOpen ? "Open" : "Closed")
+                                .font(.caption)
+                                .fontWeight(.medium)
+                                .foregroundStyle(isOpen ? .green : .red)
+                        }
+
+                        if let address = location.address {
+                            if displayIsOpen != nil {
+                                Text("·")
+                                    .font(.caption)
+                                    .foregroundStyle(.tertiary)
+                            }
+                            Text(address)
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
+                                .lineLimit(1)
+                        }
                     }
                 }
 
@@ -236,6 +315,15 @@ private struct LocationDetailContent: View {
         }
         .padding(.horizontal, 20)
         .padding(.bottom, 24)
+        .task {
+            guard !isLoadingEnrichment else { return }
+            isLoadingEnrichment = true
+            enrichment = await YelpEnrichmentManager.shared.enrich(
+                name: location.name,
+                coordinate: location.coordinate
+            )
+            isLoadingEnrichment = false
+        }
     }
 
     private func toggleFavorite() {

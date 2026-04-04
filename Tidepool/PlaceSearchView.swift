@@ -64,7 +64,8 @@ struct PlaceSearchView: View {
     @State private var searchText = ""
     @State private var searchResults: [MKMapItem] = []
     @State private var isSearching = false
-    @State private var showingSuggestions = true // Show suggestions vs full results
+    @State private var showingSuggestions = true
+    @State private var suppressNextSearchChange = false
 
     private let categories: [(label: String, icon: String, poiCategories: [MKPointOfInterestCategory])] = [
         ("Restaurants", "fork.knife", [.restaurant, .bakery, .foodMarket]),
@@ -124,7 +125,6 @@ struct PlaceSearchView: View {
                     HStack(spacing: 8) {
                         ForEach(categories, id: \.label) { cat in
                             Button {
-                                searchText = cat.label
                                 performCategorySearch(poiCategories: cat.poiCategories, label: cat.label)
                             } label: {
                                 Label(cat.label, systemImage: cat.icon)
@@ -197,7 +197,10 @@ struct PlaceSearchView: View {
                 updateCompleterRegion()
             }
             .onChange(of: searchText) { _, newValue in
-                // Live typeahead as user types
+                if suppressNextSearchChange {
+                    suppressNextSearchChange = false
+                    return
+                }
                 showingSuggestions = true
                 searchCompleter.search(newValue)
             }
@@ -236,6 +239,8 @@ struct PlaceSearchView: View {
         isSearching = true
         showingSuggestions = false
         searchCompleter.clear()
+        suppressNextSearchChange = true
+        searchText = label
 
         let coordinate = locationManager.latestLocation?.coordinate
             ?? CLLocationCoordinate2D(latitude: 34.096, longitude: -118.273)

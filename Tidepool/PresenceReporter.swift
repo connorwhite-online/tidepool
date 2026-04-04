@@ -1,5 +1,6 @@
 import Foundation
 import CoreLocation
+import TidepoolShared
 
 final class PresenceReporter {
     private weak var locationManager: LocationManager?
@@ -57,9 +58,16 @@ final class PresenceReporter {
         lastReportedTileString = tileString
         lastReportAtForTile[tileString] = now
 
-        // Stub: log instead of network call
-        let epochMs = Int(now.timeIntervalSince1970 * 1000)
+        let epochMs = Int64(now.timeIntervalSince1970 * 1000)
         let jitterMs = Int.random(in: 0...(Int(maxIntervalSec * 1000)))
-        print("[PresenceReporter] would send tile_id=\(tileString) epoch_ms=\(epochMs) client_jitter_ms=\(jitterMs)")
+        let report = PresenceReport(tileID: tileString, epochMs: epochMs, clientJitterMs: jitterMs)
+
+        Task {
+            do {
+                _ = try await BackendClient.shared.reportPresence(report)
+            } catch {
+                print("[PresenceReporter] failed to report: \(error.localizedDescription)")
+            }
+        }
     }
 } 

@@ -266,6 +266,7 @@ struct MapViewRepresentable: UIViewRepresentable {
     @Binding var navigateToCoordinate: CLLocationCoordinate2D?
     let onAnnotationTap: ((POIAnnotation, CGPoint) -> Void)?
     let onCenterChanged: ((CLLocationCoordinate2D) -> Void)?
+    let onRegionChanged: ((MKCoordinateRegion) -> Void)?
 
     func makeUIView(context: Context) -> MKMapView {
         let mapView = MKMapView(frame: .zero)
@@ -358,6 +359,7 @@ struct MapViewRepresentable: UIViewRepresentable {
         context.coordinator.highContrast = highContrast
         context.coordinator.onAnnotationTap = onAnnotationTap
         context.coordinator.onCenterChanged = onCenterChanged
+        context.coordinator.onRegionChanged = onRegionChanged
 
         // Deselect POI when the detail modal is dismissed
         if !isDetailShowing && context.coordinator.wasDetailShowing {
@@ -421,6 +423,7 @@ struct MapViewRepresentable: UIViewRepresentable {
         var wasDetailShowing: Bool = false
         var onAnnotationTap: ((POIAnnotation, CGPoint) -> Void)?
         var onCenterChanged: ((CLLocationCoordinate2D) -> Void)?
+        var onRegionChanged: ((MKCoordinateRegion) -> Void)?
 
         func mapViewDidFinishLoadingMap(_ mapView: MKMapView) {
             // Best time to adjust attribution — all internal subviews are in place
@@ -429,6 +432,7 @@ struct MapViewRepresentable: UIViewRepresentable {
 
         func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
             onCenterChanged?(mapView.centerCoordinate)
+            onRegionChanged?(mapView.region)
         }
 
         func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
