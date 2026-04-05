@@ -33,6 +33,8 @@ struct CreateVisits: AsyncMigration {
         try await sql.raw("CREATE INDEX idx_visits_poi ON visits(poi_id) WHERE poi_id IS NOT NULL").run()
         try await sql.raw("CREATE INDEX idx_visits_time ON visits(device_id, day_of_week, hour_of_day)").run()
         try await sql.raw("CREATE INDEX idx_visits_device_poi ON visits(device_id, poi_id)").run()
+        // Covering index for aligned heat aggregation queries
+        try await sql.raw("CREATE INDEX idx_visits_aligned ON visits(day_of_week, hour_of_day, device_id) INCLUDE (latitude, longitude)").run()
     }
 
     func revert(on database: Database) async throws {

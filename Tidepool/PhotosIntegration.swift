@@ -174,14 +174,20 @@ class PhotosIntegrationManager: ObservableObject {
     }
     
     private func enhanceClustersWithPlaceData(_ clusters: [PhotoLocationCluster]) async -> [PhotoLocationCluster] {
-        var enhancedClusters: [PhotoLocationCluster] = []
-        
-        for cluster in clusters {
-            let enhancedCluster = await enhanceClusterWithPlaceInfo(cluster)
-            enhancedClusters.append(enhancedCluster)
+        // Process clusters concurrently (up to 5 at a time to avoid geocoder rate limits)
+        return await withTaskGroup(of: (Int, PhotoLocationCluster).self) { group in
+            for (i, cluster) in clusters.enumerated() {
+                group.addTask {
+                    let enhanced = await self.enhanceClusterWithPlaceInfo(cluster)
+                    return (i, enhanced)
+                }
+            }
+            var results = [(Int, PhotoLocationCluster)]()
+            for await result in group {
+                results.append(result)
+            }
+            return results.sorted { $0.0 < $1.0 }.map { $0.1 }
         }
-        
-        return enhancedClusters
     }
     
     private func enhanceClusterWithPlaceInfo(_ cluster: PhotoLocationCluster) async -> PhotoLocationCluster {

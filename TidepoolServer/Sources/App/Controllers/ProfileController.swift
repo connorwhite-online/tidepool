@@ -169,23 +169,59 @@ struct ProfileController: RouteCollection {
     }
 
     /// Map raw token→weight pairs to a fixed-size vector using the global vocabulary table.
+    /// Bulk-fetches existing mappings first, then batch-inserts only new tokens.
     private func buildVector(tokens: [String: Float], vectorType: String, maxDims: Int, sql: SQLDatabase) async throws -> [Float] {
         var vector = [Float](repeating: 0, count: maxDims)
         guard !tokens.isEmpty else { return vector }
 
-        for (token, weight) in tokens {
-            // Upsert into vocabulary, get dimension index
-            let rows = try await sql.raw(SQLQueryString("""
-                INSERT INTO vector_vocabularies (vector_type, token, dimension_index, usage_count)
-                VALUES (\(bind: vectorType), \(bind: token),
-                    COALESCE((SELECT MAX(dimension_index) + 1 FROM vector_vocabularies WHERE vector_type = \(bind: vectorType)), 0),
-                    1)
-                ON CONFLICT (vector_type, token)
-                DO UPDATE SET usage_count = vector_vocabularies.usage_count + 1
-                RETURNING dimension_index
-                """)).all(decoding: DimRow.self)
+        let tokenList = Array(tokens.keys)
 
-            if let dimIndex = rows.first?.dimension_index, dimIndex < maxDims {
+        // Bulk fetch existing token→dimension mappings
+        let placeholders = tokenList.enumerated().map { "($\($0.offset + 2))" }.joined(separator: ",")
+        let existingRows = try await sql.raw(SQLQueryString("""
+            SELECT token, dimension_index FROM vector_vocabularies
+            WHERE vector_type = \(bind: vectorType) AND token = ANY(\(bind: tokenList))
+            """)).all(decoding: TokenDimRow.self)
+
+        var tokenToDim: [String: Int] = [:]
+        for row in existingRows {
+            tokenToDim[row.token] = row.dimension_index
+        }
+
+        // Update usage counts for existing tokens in one statement
+        if !tokenToDim.isEmpty {
+            try await sql.raw(SQLQueryString("""
+                UPDATE vector_vocabularies SET usage_count = usage_count + 1
+                WHERE vector_type = \(bind: vectorType) AND token = ANY(\(bind: Array(tokenToDim.keys)))
+                """)).run()
+        }
+
+        // Insert new tokens (those not already in vocabulary)
+        let newTokens = tokenList.filter { tokenToDim[$0] == nil }
+        if !newTokens.isEmpty {
+            // Get current max dimension index
+            let maxRows = try await sql.raw(SQLQueryString("""
+                SELECT COALESCE(MAX(dimension_index), -1) as max_dim
+                FROM vector_vocabularies WHERE vector_type = \(bind: vectorType)
+                """)).all(decoding: MaxDimRow.self)
+            var nextDim = (maxRows.first?.max_dim ?? -1) + 1
+
+            for token in newTokens {
+                if nextDim < maxDims {
+                    tokenToDim[token] = nextDim
+                    try await sql.raw(SQLQueryString("""
+                        INSERT INTO vector_vocabularies (vector_type, token, dimension_index, usage_count)
+                        VALUES (\(bind: vectorType), \(bind: token), \(bind: nextDim), 1)
+                        ON CONFLICT (vector_type, token) DO NOTHING
+                        """)).run()
+                    nextDim += 1
+                }
+            }
+        }
+
+        // Build vector from mappings
+        for (token, weight) in tokens {
+            if let dimIndex = tokenToDim[token], dimIndex < maxDims {
                 vector[dimIndex] = weight
             }
         }
@@ -201,6 +237,15 @@ struct ProfileController: RouteCollection {
 
     private struct DimRow: Decodable {
         let dimension_index: Int
+    }
+
+    private struct TokenDimRow: Decodable {
+        let token: String
+        let dimension_index: Int
+    }
+
+    private struct MaxDimRow: Decodable {
+        let max_dim: Int
     }
 }
 
