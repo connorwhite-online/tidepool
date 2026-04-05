@@ -94,15 +94,21 @@ class PhotosIntegrationManager: ObservableObject {
     
     private func processPhotoLocations() async {
         isProcessing = true
-        
-        let photoLocations = await fetchPhotoLocations()
-        let newClusters = await clusterLocations(photoLocations)
+
+        // Run heavy photo fetching and clustering off the main thread
+        let (photoLocations, newClusters) = await Task.detached(priority: .userInitiated) {
+            let locations = await self.fetchPhotoLocationsBackground()
+            let clustered = self.clusterLocationsSync(locations)
+            return (locations, clustered)
+        }.value
+
+        // Enhancement needs MapKit/geocoding which requires main-ish context
         let enhancedClusters = await enhanceClustersWithPlaceData(newClusters)
-        
+
         clusters = enhancedClusters
         lastProcessed = Date()
         userDefaults.set(lastProcessed, forKey: lastProcessedKey)
-        
+
         metrics = PhotoLocationMetrics(
             totalPhotos: photoLocations.count,
             locationEnabledPhotos: photoLocations.count,
@@ -110,10 +116,58 @@ class PhotosIntegrationManager: ObservableObject {
             dateRange: dateRangeFrom(photoLocations),
             processingDate: Date()
         )
-        
+
         saveClusters()
         backfillVisitsFromClusters()
         isProcessing = false
+    }
+
+    /// Fetch photo locations on a background thread (no main actor).
+    private nonisolated func fetchPhotoLocationsBackground() async -> [PhotoLocation] {
+        let fetchOptions = PHFetchOptions()
+        fetchOptions.includeHiddenAssets = false
+
+        let assets = PHAsset.fetchAssets(with: .image, options: fetchOptions)
+        var photoLocations: [PhotoLocation] = []
+
+        assets.enumerateObjects { asset, _, _ in
+            guard let location = asset.location else { return }
+            photoLocations.append(PhotoLocation(
+                coordinate: location.coordinate,
+                timestamp: asset.creationDate ?? Date(),
+                asset: asset
+            ))
+        }
+
+        return photoLocations
+    }
+
+    /// Cluster locations synchronously (pure computation, no UI).
+    private nonisolated func clusterLocationsSync(_ locations: [PhotoLocation]) -> [PhotoLocationCluster] {
+        guard !locations.isEmpty else { return [] }
+
+        let sortedLocations = locations.sorted { $0.timestamp < $1.timestamp }
+        var clusters: [LocationClusterBuilder] = []
+
+        for location in sortedLocations {
+            var addedToCluster = false
+            for cluster in clusters {
+                if cluster.canAdd(location, maxRadius: maxClusterRadius) {
+                    cluster.add(location)
+                    addedToCluster = true
+                    break
+                }
+            }
+            if !addedToCluster {
+                clusters.append(LocationClusterBuilder(initialLocation: location))
+            }
+        }
+
+        return clusters
+            .filter { $0.locations.count >= minPhotosPerCluster }
+            .sorted { $0.interestScore > $1.interestScore }
+            .prefix(maxClusters)
+            .map { $0.toPhotoLocationCluster() }
     }
     
     private func fetchPhotoLocations() async -> [PhotoLocation] {
@@ -395,19 +449,15 @@ class PhotosIntegrationManager: ObservableObject {
     /// Get a summary of discovered places for display
     func getPlacesSummary() -> String? {
         guard !clusters.isEmpty else { return nil }
-        
-        let categories = Dictionary(grouping: clusters, by: { $0.category })
-        let topCategories = categories
-            .sorted { $0.value.count > $1.value.count }
-            .prefix(3)
-            .map { "\($0.value.count) \($0.key.displayName.lowercased())" }
-        
-        if topCategories.count == 1 {
-            return topCategories.first
-        } else if topCategories.count == 2 {
-            return topCategories.joined(separator: " and ")
+
+        let photoCount = metrics?.locationEnabledPhotos ?? clusters.reduce(0) { $0 + $1.photoCount }
+        let namedCount = clusters.filter { $0.inferredName != nil && $0.category != .other && $0.category != .home }.count
+
+        let photoStr = photoCount > 1000 ? "\(photoCount / 1000)k" : "\(photoCount)"
+        if namedCount > 0 {
+            return "\(photoStr) photos · \(namedCount)/\(clusters.count) matched"
         } else {
-            return topCategories.dropLast().joined(separator: ", ") + ", and " + topCategories.last!
+            return "\(photoStr) photos · \(clusters.count) places"
         }
     }
 }

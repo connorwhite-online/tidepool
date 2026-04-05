@@ -2,6 +2,7 @@ import SwiftUI
 import MapKit
 import Photos
 import Combine
+import TidepoolShared
 
 struct ProfileView: View {
     @Environment(\.dismiss) private var dismiss
@@ -25,6 +26,10 @@ struct ProfileView: View {
     @State private var showingPlaceSearch = false
     @State private var showingBirthdayPicker = false
     @State private var tempBirthday: Date = Calendar.current.date(byAdding: .year, value: -25, to: Date()) ?? Date()
+    @State private var visitPatterns: [VisitPattern] = []
+    @State private var isLoadingVisits = false
+    @State private var pendingVisitCount: Int = 0
+    @State private var showingPendingVisits = false
 
     var body: some View {
         mainForm
@@ -60,8 +65,7 @@ struct ProfileView: View {
         ScrollView {
             VStack(spacing: 20) {
                 integrationsCard
-                interestProfileCard
-                favoritesCard
+                visitsCard
                 locationCard
                 privacyCard
             }
@@ -106,6 +110,28 @@ struct ProfileView: View {
                 appleMusicManager: appleMusicManager,
                 ageRangeManager: ageRangeManager
             )
+        }
+
+        loadVisitData()
+    }
+
+    private func loadVisitData() {
+        // Show pending local count
+        let pending = UserDefaults.standard.data(forKey: "pending_visits")
+            .flatMap { try? JSONDecoder().decode([VisitReport].self, from: $0) }
+        pendingVisitCount = pending?.count ?? 0
+
+        // Fetch server patterns
+        guard BackendClient.shared.isAuthenticated else { return }
+        isLoadingVisits = true
+        Task {
+            do {
+                let response = try await BackendClient.shared.getVisitPatterns()
+                visitPatterns = response.patterns
+            } catch {
+                print("[ProfileView] visit patterns fetch failed: \(error.localizedDescription)")
+            }
+            isLoadingVisits = false
         }
     }
 
@@ -558,67 +584,91 @@ struct ProfileView: View {
             .padding(.top, 20)
             .padding(.bottom, 14)
 
-            // Integration pills
+            // Integration cards with inline insights
             VStack(spacing: 10) {
                 // Birthday
-                integrationPill(icon: "birthday.cake.fill", title: "Birthday", tint: .pink) {
-                    if ageRangeManager.isAuthorized {
-                        Button {
-                            tempBirthday = ageRangeManager.birthday ?? Date()
-                            showingBirthdayPicker = true
-                        } label: {
-                            connectedBadge(text: ageRangeManager.displayAge)
+                Button {
+                    tempBirthday = ageRangeManager.birthday ?? Calendar.current.date(byAdding: .year, value: -25, to: Date()) ?? Date()
+                    showingBirthdayPicker = true
+                } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: "birthday.cake.fill")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 38, height: 38)
+                            .background(Color.pink.gradient)
+                            .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                            .shadow(color: .pink.opacity(0.3), radius: 4, y: 2)
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Birthday")
+                                .font(.subheadline)
+                                .fontWeight(.semibold)
+                                .foregroundStyle(.primary)
+                            if ageRangeManager.isAuthorized {
+                                Text(ageRangeManager.displayAge)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
                         }
-                        .buttonStyle(.plain)
-                    } else {
-                        connectButton { tempBirthday = Calendar.current.date(byAdding: .year, value: -25, to: Date()) ?? Date(); showingBirthdayPicker = true }
+
+                        Spacer()
+
+                        Image(systemName: ageRangeManager.isAuthorized ? "pencil" : "plus")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(.white)
+                            .frame(width: 28, height: 28)
+                            .background(
+                                LinearGradient(colors: [.blue, .cyan], startPoint: .topLeading, endPoint: .bottomTrailing)
+                            )
+                            .clipShape(Circle())
+                            .shadow(color: .blue.opacity(0.3), radius: 4, y: 2)
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                    .background(Color(UIColor.secondarySystemGroupedBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                 }
+                .buttonStyle(.plain)
+
+                // Favorites — special: plus button + tapping opens favorites list
+                favoritesIntegrationCard()
 
                 // Spotify
-                integrationPill(icon: "waveform", title: "Spotify", tint: .green) {
-                    if spotifyManager.isConnected && spotifyManager.isSyncing {
-                        syncingBadge
-                    } else if spotifyManager.isConnected {
-                        connectedMenu(
-                            summary: spotifyManager.getSummary(),
-                            onRefresh: { Task { await spotifyManager.refreshData() } },
-                            onDisconnect: { spotifyManager.disconnect() }
-                        )
-                    } else {
-                        connectButton { Task { await spotifyManager.authenticate() } }
-                    }
-                }
+                tappableIntegrationCard(
+                    icon: "waveform", title: "Spotify", tint: .green,
+                    isConnected: spotifyManager.isConnected,
+                    isSyncing: spotifyManager.isConnected && spotifyManager.isSyncing,
+                    summary: spotifyManager.getSummary(),
+                    tags: vectorManager?.getSourceInsights().first(where: { $0.name == "Spotify" })?.topTags ?? [],
+                    onConnect: { Task { await spotifyManager.authenticate() } },
+                    onRefresh: { Task { await spotifyManager.refreshData() } },
+                    onDisconnect: { spotifyManager.disconnect() }
+                )
 
                 // Apple Music
-                integrationPill(icon: "music.note", title: "Apple Music", tint: .red) {
-                    if appleMusicManager.isAuthorized && appleMusicManager.isSyncing {
-                        syncingBadge
-                    } else if appleMusicManager.isAuthorized {
-                        connectedMenu(
-                            summary: appleMusicManager.getSummary(),
-                            onRefresh: { Task { await appleMusicManager.refreshData() } },
-                            onDisconnect: { appleMusicManager.disconnect() }
-                        )
-                    } else {
-                        connectButton { Task { await appleMusicManager.requestAuthorization() } }
-                    }
-                }
+                tappableIntegrationCard(
+                    icon: "music.note", title: "Apple Music", tint: .red,
+                    isConnected: appleMusicManager.isAuthorized,
+                    isSyncing: appleMusicManager.isAuthorized && appleMusicManager.isSyncing,
+                    summary: appleMusicManager.getSummary(),
+                    tags: vectorManager?.getSourceInsights().first(where: { $0.name == "Apple Music" })?.topTags ?? [],
+                    onConnect: { Task { await appleMusicManager.requestAuthorization() } },
+                    onRefresh: { Task { await appleMusicManager.refreshData() } },
+                    onDisconnect: { appleMusicManager.disconnect() }
+                )
 
                 // Photos
-                integrationPill(icon: "photo.fill", title: "Photos", tint: .orange) {
-                    if photosManager.isEnabled && photosManager.isProcessing {
-                        syncingBadge
-                    } else if photosManager.isEnabled {
-                        connectedMenu(
-                            summary: photosManager.getPlacesSummary(),
-                            onRefresh: { Task { await photosManager.refreshData() } },
-                            onDisconnect: { disconnectPhotos() }
-                        )
-                    } else {
-                        connectButton { connectPhotos() }
-                    }
-                }
+                tappableIntegrationCard(
+                    icon: "photo.fill", title: "Photos", tint: .orange,
+                    isConnected: photosManager.isEnabled,
+                    isSyncing: photosManager.isEnabled && photosManager.isProcessing,
+                    summary: photosManager.getPlacesSummary(),
+                    tags: vectorManager?.getSourceInsights().first(where: { $0.name == "Photos" })?.topTags ?? [],
+                    onConnect: { connectPhotos() },
+                    onRefresh: { Task { await photosManager.refreshData() } },
+                    onDisconnect: { disconnectPhotos() }
+                )
             }
             .padding(.horizontal, 16)
             .padding(.bottom, 20)
@@ -652,66 +702,165 @@ struct ProfileView: View {
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 
-    private func connectButton(action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text("Connect")
-                .font(.caption)
-                .fontWeight(.bold)
-                .foregroundStyle(.white)
+    /// Integration card where tapping the header triggers connect or shows a menu.
+    private func tappableIntegrationCard(
+        icon: String, title: String, tint: Color,
+        isConnected: Bool, isSyncing: Bool = false,
+        summary: String?, tags: [InterestVectorManager.TagWeight],
+        onConnect: @escaping () -> Void,
+        onRefresh: @escaping () -> Void,
+        onDisconnect: @escaping () -> Void
+    ) -> some View {
+        VStack(spacing: 0) {
+            // Header row — always visible, never replaced by Menu label
+            HStack(spacing: 12) {
+                Image(systemName: icon)
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 38, height: 38)
+                    .background(tint.gradient)
+                    .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                    .shadow(color: tint.opacity(0.3), radius: 4, y: 2)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.subheadline)
+                        .fontWeight(.semibold)
+                    if let summary, isConnected {
+                        Text(summary)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+
+                Spacer()
+
+                if isSyncing {
+                    ProgressView()
+                        .controlSize(.small)
+                        .frame(width: 28, height: 28)
+                } else if isConnected {
+                    // Checkmark with invisible Menu overlay so it never disappears
+                    ZStack {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(.white)
+                            .frame(width: 28, height: 28)
+                            .background(
+                                LinearGradient(colors: [.green, .mint], startPoint: .topLeading, endPoint: .bottomTrailing)
+                            )
+                            .clipShape(Circle())
+                            .shadow(color: .green.opacity(0.3), radius: 4, y: 2)
+
+                        Menu {
+                            Button { onRefresh() } label: {
+                                Label("Refresh Data", systemImage: "arrow.clockwise")
+                            }
+                            Divider()
+                            Button(role: .destructive) { onDisconnect() } label: {
+                                Label("Disconnect", systemImage: "xmark.circle")
+                            }
+                        } label: {
+                            Color.clear.frame(width: 28, height: 28)
+                        }
+                    }
+                } else {
+                    Button { onConnect() } label: {
+                        Text("Connect")
+                            .font(.caption)
+                            .fontWeight(.bold)
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 8)
+                            .background(
+                                LinearGradient(colors: [.blue, .cyan], startPoint: .leading, endPoint: .trailing)
+                            )
+                            .clipShape(Capsule())
+                            .shadow(color: .blue.opacity(0.25), radius: 4, y: 2)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+
+            // Inline donut chart or skeleton
+            if isConnected && !tags.isEmpty && !isSyncing {
+                Divider()
+                    .padding(.horizontal, 16)
+                DonutChartView(tags: tags, size: 64, lineWidth: 14)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+            } else if isConnected && isSyncing {
+                Divider()
+                    .padding(.horizontal, 16)
+                DonutSkeletonView()
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+            }
+        }
+        .background(Color(UIColor.secondarySystemGroupedBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    /// Favorites card — plus button to add, tapping header opens favorites list
+    private func favoritesIntegrationCard() -> some View {
+        let tags = vectorManager?.getSourceInsights().first(where: { $0.name == "Favorites" })?.topTags ?? []
+
+        return VStack(spacing: 0) {
+            Button { showingFavorites = true } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: "star.fill")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 38, height: 38)
+                        .background(Color.yellow.gradient)
+                        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                        .shadow(color: .yellow.opacity(0.3), radius: 4, y: 2)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Favorites")
+                            .font(.subheadline)
+                            .fontWeight(.semibold)
+                            .foregroundStyle(.primary)
+                        if !favoritesManager.favorites.isEmpty {
+                            Text("\(favoritesManager.favorites.count) places")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    Spacer()
+
+                    Button { showingPlaceSearch = true } label: {
+                        Image(systemName: "plus")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(.white)
+                            .frame(width: 28, height: 28)
+                            .background(
+                                LinearGradient(colors: [.blue, .cyan], startPoint: .topLeading, endPoint: .bottomTrailing)
+                            )
+                            .clipShape(Circle())
+                            .shadow(color: .blue.opacity(0.3), radius: 4, y: 2)
+                    }
+                    .buttonStyle(.plain)
+                }
                 .padding(.horizontal, 16)
-                .padding(.vertical, 8)
-                .background(
-                    LinearGradient(colors: [.blue, .cyan], startPoint: .leading, endPoint: .trailing)
-                )
-                .clipShape(Capsule())
-                .shadow(color: .blue.opacity(0.25), radius: 4, y: 2)
-        }
-        .buttonStyle(.plain)
-    }
+                .padding(.vertical, 12)
+            }
+            .buttonStyle(.plain)
 
-    private func connectedMenu(summary: String?, onRefresh: @escaping () -> Void, onDisconnect: @escaping () -> Void) -> some View {
-        Menu {
-            Button { onRefresh() } label: {
-                Label("Refresh Data", systemImage: "arrow.clockwise")
-            }
-            Divider()
-            Button(role: .destructive) { onDisconnect() } label: {
-                Label("Disconnect", systemImage: "xmark.circle")
-            }
-        } label: {
-            VStack(alignment: .trailing, spacing: 2) {
-                HStack(spacing: 4) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.caption2)
-                        .foregroundStyle(.green)
-                    Text("Connected")
-                        .font(.caption)
-                        .fontWeight(.medium)
-                        .foregroundStyle(.green)
-                    Image(systemName: "chevron.down")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                }
-                if let summary {
-                    Text(summary)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
+            if !tags.isEmpty {
+                Divider()
+                    .padding(.horizontal, 16)
+                DonutChartView(tags: tags, size: 64, lineWidth: 14)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
             }
         }
-    }
-
-    private func connectedBadge(text: String) -> some View {
-        HStack(spacing: 4) {
-            Image(systemName: "checkmark.circle.fill")
-                .font(.caption2)
-            Text(text)
-                .font(.caption)
-                .fontWeight(.medium)
-                .lineLimit(1)
-        }
-        .foregroundStyle(.green)
+        .background(Color(UIColor.secondarySystemGroupedBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 
     private var syncingBadge: some View {
@@ -756,6 +905,144 @@ struct ProfileView: View {
         .background(.regularMaterial)
         .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
         .shadow(color: .purple.opacity(0.08), radius: 12, y: 4)
+    }
+
+    private var visitsCard: some View {
+        VStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Check-ins")
+                    .font(.title3)
+                    .fontWeight(.bold)
+                Text("Places you've visited")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 20)
+            .padding(.top, 20)
+
+            if isLoadingVisits {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Loading visits...")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.bottom, 20)
+            } else if visitPatterns.isEmpty && pendingVisitCount == 0 {
+                VStack(spacing: 6) {
+                    Image(systemName: "mappin.and.ellipse")
+                        .font(.title2)
+                        .foregroundStyle(.tertiary)
+                    Text("No visits detected yet")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    Text("Tidepool detects visits when you stay at a place for 5+ minutes")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 20)
+                }
+                .padding(.bottom, 20)
+            } else {
+                VStack(spacing: 8) {
+                    // Pending local visits badge — tappable for details
+                    if pendingVisitCount > 0 {
+                        Button { showingPendingVisits = true } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: "arrow.up.circle.fill")
+                                    .foregroundStyle(.orange)
+                                    .font(.subheadline)
+                                Text("\(pendingVisitCount) pending upload")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                                Image(systemName: "chevron.right")
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.horizontal, 20)
+                    }
+
+                    // Server-synced visit patterns
+                    ForEach(Array(visitPatterns.prefix(8).enumerated()), id: \.offset) { i, pattern in
+                        visitPatternRow(pattern, index: i)
+                    }
+
+                    if visitPatterns.count > 8 {
+                        Text("+ \(visitPatterns.count - 8) more places")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                            .padding(.bottom, 4)
+                    }
+                }
+                .padding(.bottom, 16)
+            }
+        }
+        .background(.regularMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .shadow(color: .cyan.opacity(0.08), radius: 12, y: 4)
+        .sheet(isPresented: $showingPendingVisits) {
+            PendingVisitsSheet(onDismiss: {
+                showingPendingVisits = false
+                loadVisitData() // refresh counts
+            })
+        }
+    }
+
+    private let visitColors: [Color] = [.cyan, .blue, .teal, .indigo, .purple, .green, .orange, .mint]
+
+    private func visitPatternRow(_ pattern: VisitPattern, index: Int) -> some View {
+        let color = visitColors[index % visitColors.count]
+        let categoryIcon = (PlaceCategory(rawValue: pattern.category.rawValue) ?? .other).iconName
+
+        return HStack(spacing: 12) {
+            Image(systemName: categoryIcon)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 34, height: 34)
+                .background(color.gradient)
+                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(pattern.name)
+                    .font(.subheadline)
+                    .fontWeight(.medium)
+                    .lineLimit(1)
+
+                HStack(spacing: 6) {
+                    Text("\(pattern.visitCount) visit\(pattern.visitCount == 1 ? "" : "s")")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    if !pattern.typicalHours.isEmpty {
+                        let hourStr = pattern.typicalHours.prefix(2)
+                            .map { formatHour($0) }
+                            .joined(separator: ", ")
+                        Text("around \(hourStr)")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+            }
+
+            Spacer()
+
+            Text("\(pattern.avgDurationMinutes)m")
+                .font(.caption)
+                .fontWeight(.semibold)
+                .foregroundStyle(color)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 6)
+    }
+
+    private func formatHour(_ hour: Int) -> String {
+        let h = hour % 12 == 0 ? 12 : hour % 12
+        let ampm = hour < 12 ? "am" : "pm"
+        return "\(h)\(ampm)"
     }
 
     private var favoritesCard: some View {
@@ -1036,39 +1323,169 @@ struct ProfileView: View {
 
 struct SimpleHomePicker: View {
     @Environment(\.dismiss) private var dismiss
-    @State private var centerCoordinate: CLLocationCoordinate2D
+    @StateObject private var searchCompleter = PlaceSearchCompleter()
+    @State private var searchText = ""
+    @State private var selectedCoordinate: CLLocationCoordinate2D?
+    @State private var selectedAddress: String?
+    @State private var isSearching = false
+    @FocusState private var isFieldFocused: Bool
+    let current: CLLocationCoordinate2D?
     let onSelect: (CLLocationCoordinate2D) -> Void
 
     init(current: CLLocationCoordinate2D?, onSelect: @escaping (CLLocationCoordinate2D) -> Void) {
+        self.current = current
         self.onSelect = onSelect
-        _centerCoordinate = State(initialValue: current ?? CLLocationCoordinate2D(latitude: 37.7749, longitude: -122.4194))
     }
 
     var body: some View {
-        let initialRegion = MKCoordinateRegion(
-            center: centerCoordinate,
-            span: MKCoordinateSpan(latitudeDelta: 0.01, longitudeDelta: 0.01)
-        )
-        return VStack(spacing: 0) {
-            HomePickerMapRepresentable(centerCoordinate: $centerCoordinate, initialRegion: initialRegion)
-                .overlay(alignment: .center) {
-                    Image(systemName: "house.fill")
-                        .font(.title)
-                        .foregroundColor(.red)
-                        .shadow(radius: 3)
-                }
-                .ignoresSafeArea()
+        VStack(spacing: 0) {
+            // Header
             HStack {
                 Button("Cancel") { dismiss() }
+                    .foregroundStyle(.secondary)
                 Spacer()
-                Button("Set Home Here") {
-                    onSelect(centerCoordinate)
-                    dismiss()
+                Text("Set Home")
+                    .font(.headline)
+                Spacer()
+                Button("Save") {
+                    if let coord = selectedCoordinate {
+                        onSelect(coord)
+                        dismiss()
+                    }
                 }
-                .buttonStyle(.borderedProminent)
+                .fontWeight(.semibold)
+                .disabled(selectedCoordinate == nil)
             }
             .padding()
-            .background(.ultraThinMaterial)
+
+            Divider()
+
+            // Search bar
+            HStack(spacing: 10) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(.secondary)
+
+                TextField("Enter your home address...", text: $searchText)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 16, weight: .medium))
+                    .focused($isFieldFocused)
+
+                if !searchText.isEmpty {
+                    Button {
+                        searchText = ""
+                        selectedCoordinate = nil
+                        selectedAddress = nil
+                        searchCompleter.clear()
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.tertiary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 12)
+            .background(Color(UIColor.tertiarySystemFill))
+            .clipShape(Capsule())
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+
+            // Selected address confirmation
+            if let address = selectedAddress {
+                HStack(spacing: 12) {
+                    Image(systemName: "house.fill")
+                        .font(.title2)
+                        .foregroundStyle(.blue)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(address)
+                            .font(.subheadline)
+                            .fontWeight(.medium)
+                        Text("Your presence will be hidden within 500 ft of this location")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(16)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.blue.opacity(0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .padding(.horizontal, 16)
+                .padding(.top, 12)
+            }
+
+            // Suggestions
+            if !searchCompleter.suggestions.isEmpty && selectedAddress == nil {
+                List {
+                    ForEach(searchCompleter.suggestions, id: \.self) { suggestion in
+                        Button {
+                            resolveAndSelect(suggestion)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(suggestion.title)
+                                    .font(.subheadline)
+                                    .fontWeight(.medium)
+                                if !suggestion.subtitle.isEmpty {
+                                    Text(suggestion.subtitle)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .listStyle(.plain)
+            } else if selectedAddress == nil {
+                Spacer()
+                VStack(spacing: 8) {
+                    Image(systemName: "house")
+                        .font(.largeTitle)
+                        .foregroundStyle(.quaternary)
+                    if let current {
+                        Text("Home is currently set")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                        Text(String(format: "%.4f, %.4f", current.latitude, current.longitude))
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    } else {
+                        Text("Search for your home address")
+                            .font(.subheadline)
+                            .foregroundStyle(.quaternary)
+                    }
+                }
+                Spacer()
+            } else {
+                Spacer()
+            }
+        }
+        .fontDesign(.rounded)
+        .onAppear {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                isFieldFocused = true
+            }
+        }
+        .onChange(of: searchText) { _, newValue in
+            selectedCoordinate = nil
+            selectedAddress = nil
+            searchCompleter.search(newValue)
+        }
+    }
+
+    private func resolveAndSelect(_ suggestion: MKLocalSearchCompletion) {
+        isFieldFocused = false
+        let request = MKLocalSearch.Request(completion: suggestion)
+        MKLocalSearch(request: request).start { response, _ in
+            if let item = response?.mapItems.first,
+               let location = item.placemark.location {
+                selectedCoordinate = location.coordinate
+                selectedAddress = [suggestion.title, suggestion.subtitle]
+                    .filter { !$0.isEmpty }
+                    .joined(separator: ", ")
+                searchText = selectedAddress ?? suggestion.title
+            }
         }
     }
 }
@@ -1168,6 +1585,131 @@ struct BirthdayPickerSheet: View {
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .padding(.bottom)
+        }
+    }
+}
+
+// MARK: - Pending Visits Debug Sheet
+
+struct PendingVisitsSheet: View {
+    let onDismiss: () -> Void
+    private let detector = VisitDetector.shared
+    private let iso = ISO8601DateFormatter()
+
+    var body: some View {
+        NavigationView {
+            List {
+                // Status section
+                Section("Upload Status") {
+                    if let lastDate = detector.lastUploadDate {
+                        HStack {
+                            Label("Last upload", systemImage: "checkmark.circle.fill")
+                                .foregroundStyle(.green)
+                            Spacer()
+                            Text(lastDate, style: .relative)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    if let error = detector.lastUploadError {
+                        HStack {
+                            Label("Last error", systemImage: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.red)
+                            Spacer()
+                            Text(error)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                        }
+                    }
+
+                    Button {
+                        detector.retryUpload()
+                    } label: {
+                        Label("Retry Upload Now", systemImage: "arrow.clockwise")
+                    }
+
+                    Button(role: .destructive) {
+                        detector.clearPending()
+                        onDismiss()
+                    } label: {
+                        Label("Clear Queue", systemImage: "trash")
+                    }
+                }
+
+                // Pending visits
+                Section("Pending Visits (\(detector.pendingVisits.count))") {
+                    if detector.pendingVisits.isEmpty {
+                        Text("Queue is empty")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(Array(detector.pendingVisits.enumerated()), id: \.offset) { _, visit in
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack {
+                                    Text(visit.name)
+                                        .font(.subheadline)
+                                        .fontWeight(.medium)
+                                    Spacer()
+                                    Text(visit.source)
+                                        .font(.caption2)
+                                        .fontWeight(.semibold)
+                                        .foregroundStyle(.white)
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(visit.source == "visit" ? Color.blue : (visit.source == "photo" ? Color.orange : Color.yellow))
+                                        .clipShape(Capsule())
+                                }
+
+                                HStack(spacing: 12) {
+                                    Label(visit.category.rawValue, systemImage: "tag")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+
+                                    Label(String(format: "%.4f, %.4f", visit.latitude, visit.longitude), systemImage: "location")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+
+                                HStack(spacing: 12) {
+                                    Label("\(visit.durationMinutes)m", systemImage: "clock")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+
+                                    Label("confidence: \(String(format: "%.0f%%", visit.confidence * 100))", systemImage: "gauge.medium")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+
+                                if let poiId = visit.poiId {
+                                    Text("POI: \(poiId)")
+                                        .font(.caption2)
+                                        .foregroundStyle(.tertiary)
+                                        .lineLimit(1)
+                                }
+
+                                if let yelpId = visit.yelpId {
+                                    Text("Yelp: \(yelpId)")
+                                        .font(.caption2)
+                                        .foregroundStyle(.tertiary)
+                                }
+
+                                Text(visit.arrivedAt)
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
+                            }
+                            .padding(.vertical, 4)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Upload Queue")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { onDismiss() }
+                }
+            }
         }
     }
 }

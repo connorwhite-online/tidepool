@@ -76,16 +76,22 @@ struct PlaceSearchView: View {
         ("Fitness", "dumbbell", [.fitnessCenter]),
     ]
 
+    private var isActivelySearching: Bool {
+        !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     var body: some View {
         NavigationView {
             VStack(spacing: 0) {
-                // Search bar
-                HStack {
+                // Search bar — matches MapSearchSheet style
+                HStack(spacing: 10) {
                     Image(systemName: "magnifyingglass")
+                        .font(.system(size: 16, weight: .semibold))
                         .foregroundStyle(.secondary)
 
-                    TextField("Search for a place...", text: $searchText)
+                    TextField("Search places...", text: $searchText)
                         .textFieldStyle(.plain)
+                        .font(.system(size: 16, weight: .medium))
                         .onSubmit { performFullSearch() }
 
                     if !searchText.isEmpty {
@@ -96,31 +102,20 @@ struct PlaceSearchView: View {
                             showingSuggestions = true
                         } label: {
                             Image(systemName: "xmark.circle.fill")
+                                .font(.body)
                                 .foregroundStyle(.tertiary)
                         }
                         .buttonStyle(.plain)
                     }
-
-                    Button {
-                        performFullSearch()
-                    } label: {
-                        Text("Search")
-                            .font(.subheadline)
-                            .fontWeight(.medium)
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.blue)
-                    .opacity(searchText.isEmpty ? 0.4 : 1)
-                    .disabled(searchText.isEmpty)
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(.quaternary)
-                .clipShape(RoundedRectangle(cornerRadius: 10))
-                .padding(.horizontal)
-                .padding(.top, 8)
+                .padding(.horizontal, 18)
+                .padding(.vertical, 12)
+                .background(Color(UIColor.tertiarySystemFill))
+                .clipShape(Capsule())
+                .padding(.horizontal, 16)
+                .padding(.top, 16)
 
-                // Category chips
+                // Category chips — matches MapSearchSheet style
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
                         ForEach(categories, id: \.label) { cat in
@@ -128,22 +123,24 @@ struct PlaceSearchView: View {
                                 performCategorySearch(poiCategories: cat.poiCategories, label: cat.label)
                             } label: {
                                 Label(cat.label, systemImage: cat.icon)
-                                    .font(.caption)
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 6)
-                                    .background(.quaternary)
-                                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                                    .font(.subheadline)
+                                    .fontWeight(.medium)
+                                    .padding(.horizontal, 14)
+                                    .padding(.vertical, 8)
+                                    .background(Color(UIColor.tertiarySystemFill))
+                                    .clipShape(Capsule())
                             }
                             .buttonStyle(.plain)
                         }
                     }
-                    .padding(.horizontal)
+                    .padding(.horizontal, 16)
                 }
-                .padding(.vertical, 10)
+                .padding(.top, 14)
 
                 Divider()
+                    .padding(.top, 12)
 
-                // Content: suggestions, full results, or empty state
+                // Content
                 if isSearching {
                     List {
                         ForEach(0..<4, id: \.self) { _ in
@@ -151,8 +148,7 @@ struct PlaceSearchView: View {
                         }
                     }
                     .listStyle(.plain)
-                } else if showingSuggestions && !searchCompleter.suggestions.isEmpty {
-                    // Typeahead suggestions
+                } else if isActivelySearching && showingSuggestions && !searchCompleter.suggestions.isEmpty {
                     List {
                         ForEach(searchCompleter.suggestions, id: \.self) { suggestion in
                             Button {
@@ -165,26 +161,74 @@ struct PlaceSearchView: View {
                     }
                     .listStyle(.plain)
                 } else if !showingSuggestions && !searchResults.isEmpty {
-                    // Full search results
                     List {
                         ForEach(searchResults, id: \.self) { mapItem in
                             PlaceSearchRowView(mapItem: mapItem, favoritesManager: favoritesManager)
                         }
                     }
                     .listStyle(.plain)
+                } else if !isActivelySearching {
+                    // Default: show existing favorites
+                    if favoritesManager.favorites.isEmpty {
+                        Spacer()
+                        VStack(spacing: 8) {
+                            Image(systemName: "star")
+                                .font(.largeTitle)
+                                .foregroundStyle(.quaternary)
+                            Text("Search for places to add")
+                                .font(.subheadline)
+                                .foregroundStyle(.quaternary)
+                        }
+                        Spacer()
+                    } else {
+                        List {
+                            ForEach(favoritesManager.favorites, id: \.id) { favorite in
+                                HStack(spacing: 12) {
+                                    Image(systemName: favorite.category.iconName)
+                                        .font(.title3)
+                                        .foregroundStyle(.secondary)
+                                        .frame(width: 28)
+
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(favorite.name)
+                                            .font(.subheadline)
+                                            .fontWeight(.medium)
+                                            .lineLimit(1)
+                                        Text(favorite.category.displayName)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+
+                                    Spacer()
+
+                                    Image(systemName: "star.fill")
+                                        .font(.subheadline)
+                                        .foregroundStyle(.yellow)
+                                }
+                                .padding(.vertical, 2)
+                                .swipeActions(edge: .trailing) {
+                                    Button("Remove", role: .destructive) {
+                                        favoritesManager.removeFavorite(for: favorite.placeId)
+                                    }
+                                }
+                            }
+                        }
+                        .listStyle(.plain)
+                    }
                 } else {
                     Spacer()
                     VStack(spacing: 8) {
                         Image(systemName: "mappin.and.ellipse")
                             .font(.largeTitle)
                             .foregroundStyle(.secondary)
-                        Text(searchText.isEmpty ? "Search for places to add to favorites" : (searchCompleter.isCompleting ? "Searching..." : "No results found"))
+                        Text("No results found")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
                 }
             }
+            .fontDesign(.rounded)
             .navigationTitle("Add Place")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

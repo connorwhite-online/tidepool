@@ -1,6 +1,7 @@
 import Foundation
 import CoreLocation
 import MapKit
+import BackgroundTasks
 import TidepoolShared
 
 /// Detects real POI visits from CLVisit events and location dwell,
@@ -14,7 +15,9 @@ final class VisitDetector: NSObject {
     private let batchUploadInterval: TimeInterval = 900 // 15 minutes
     private let storeKey = "pending_visits"
 
-    private var pendingVisits: [VisitReport] = []
+    private(set) var pendingVisits: [VisitReport] = []
+    private(set) var lastUploadError: String?
+    private(set) var lastUploadDate: Date?
     private var uploadTimer: Timer?
     private var homeLocation: CLLocationCoordinate2D?
 
@@ -24,9 +27,53 @@ final class VisitDetector: NSObject {
 
     private let iso = ISO8601DateFormatter()
 
+    static let bgTaskIdentifier = "studio.connorwhite.Tidepool.visitUpload"
+
     override init() {
         super.init()
         loadPending()
+        // Load home location from UserDefaults at init
+        if let data = UserDefaults.standard.data(forKey: "home_location"),
+           let coords = try? JSONDecoder().decode([Double].self, from: data), coords.count == 2 {
+            homeLocation = CLLocationCoordinate2D(latitude: coords[0], longitude: coords[1])
+        }
+    }
+
+    // MARK: - Background Task Scheduling
+
+    /// Register the background task handler. Call once at app launch.
+    func registerBackgroundTask() {
+        BGTaskScheduler.shared.register(forTaskWithIdentifier: Self.bgTaskIdentifier, using: nil) { task in
+            self.handleBackgroundTask(task as! BGProcessingTask)
+        }
+    }
+
+    /// Schedule the next background upload. Call after each flush or on app background.
+    func scheduleBackgroundUpload() {
+        let request = BGProcessingTaskRequest(identifier: Self.bgTaskIdentifier)
+        request.requiresNetworkConnectivity = true
+        request.earliestBeginDate = Date(timeIntervalSinceNow: 15 * 60) // 15 min
+        do {
+            try BGTaskScheduler.shared.submit(request)
+        } catch {
+            print("[VisitDetector] bg task scheduling failed: \(error.localizedDescription)")
+        }
+    }
+
+    private func handleBackgroundTask(_ task: BGProcessingTask) {
+        // Schedule the next one
+        scheduleBackgroundUpload()
+
+        task.expirationHandler = {
+            task.setTaskCompleted(success: false)
+        }
+
+        flushToServer()
+
+        // Give the upload a moment then mark complete
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+            task.setTaskCompleted(success: true)
+        }
     }
 
     /// Called when the app comes to foreground or periodically.
@@ -55,8 +102,12 @@ final class VisitDetector: NSObject {
         // Skip ongoing visits
         guard visit.departureDate != .distantFuture else { return }
 
+        // Skip bogus dates (iOS sometimes returns .distantPast for arrival)
+        guard visit.arrivalDate.timeIntervalSince1970 > 946684800 else { return } // after year 2000
+
         let duration = visit.departureDate.timeIntervalSince(visit.arrivalDate)
         guard duration >= minDwellSeconds else { return }
+        guard duration < 86400 else { return } // skip visits longer than 24 hours (bogus)
 
         // Home exclusion
         if let home = homeLocation {
@@ -152,6 +203,9 @@ final class VisitDetector: NSObject {
                 self.pendingVisits.append(report)
                 self.savePending()
 
+                // Flush immediately — we may only have a few seconds of background time
+                self.flushToServer()
+
                 // Try Yelp match in background
                 Task {
                     if let match = try? await BackendClient.shared.matchPlace(
@@ -200,20 +254,35 @@ final class VisitDetector: NSObject {
 
         Task { @MainActor in
             guard BackendClient.shared.isAuthenticated else {
-                // Re-queue if not authenticated
                 self.pendingVisits.append(contentsOf: batch)
                 self.savePending()
+                self.lastUploadError = "Not authenticated"
                 return
             }
             do {
                 let response = try await BackendClient.shared.uploadVisits(VisitBatchRequest(visits: batch))
+                self.lastUploadDate = Date()
+                self.lastUploadError = nil
                 print("[VisitDetector] uploaded \(response.accepted) visits, \(response.duplicates) duplicates")
             } catch {
                 self.pendingVisits.append(contentsOf: batch)
                 self.savePending()
+                self.lastUploadError = error.localizedDescription
                 print("[VisitDetector] upload failed, re-queued: \(error.localizedDescription)")
             }
         }
+    }
+
+    /// Manually retry flushing pending visits.
+    func retryUpload() {
+        flushToServer()
+    }
+
+    /// Clear all pending visits.
+    func clearPending() {
+        pendingVisits = []
+        savePending()
+        lastUploadError = nil
     }
 
     // MARK: - Persistence

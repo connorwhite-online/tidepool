@@ -428,33 +428,33 @@ class InterestVectorManager: ObservableObject {
     func getSourceInsights() -> [SourceInsight] {
         var sources: [SourceInsight] = []
 
-        // Favorites
-        let favTags = topWeightedTags(from: favoritesManager.getInterestTags())
+        // Favorites — show actual place names and categories
+        let favTags = favoritesRawInsights()
         sources.append(SourceInsight(
             name: "Favorites", icon: "star.fill", color: .yellow,
             topTags: favTags, isConnected: !favoritesManager.favorites.isEmpty
         ))
 
-        // Spotify
+        // Spotify — show raw genre strings from artists
         if let spotify = spotifyManager {
-            let tags = topWeightedTags(from: spotify.getInterestTags())
+            let tags = spotifyRawInsights(spotify)
             sources.append(SourceInsight(
                 name: "Spotify", icon: "waveform", color: .green,
                 topTags: tags, isConnected: !spotify.topArtists.isEmpty
             ))
         }
 
-        // Apple Music
+        // Apple Music — show raw genre names from library
         if let appleMusic = appleMusicManager {
-            let tags = topWeightedTags(from: appleMusic.getInterestTags())
+            let tags = appleMusicRawInsights(appleMusic)
             sources.append(SourceInsight(
                 name: "Apple Music", icon: "music.note", color: .red,
                 topTags: tags, isConnected: !appleMusic.recentlyPlayed.isEmpty
             ))
         }
 
-        // Photos
-        let photoTags = topWeightedTags(from: photosManager.getInterestTags())
+        // Photos — show inferred place names
+        let photoTags = photosRawInsights()
         sources.append(SourceInsight(
             name: "Photos", icon: "photo.fill", color: .orange,
             topTags: photoTags, isConnected: !photosManager.clusters.isEmpty
@@ -463,11 +463,84 @@ class InterestVectorManager: ObservableObject {
         return sources
     }
 
-    private func topWeightedTags(from tagCounts: [String: Int], limit: Int = 6) -> [TagWeight] {
-        // Filter to only vocabulary tags — drop junk like "general"
-        let vocabSet = Set(InterestVocabulary.tags)
-        let filtered = tagCounts.filter { vocabSet.contains(normalizeTag($0.key)) }
-        let sorted = filtered.sorted { $0.value > $1.value }.prefix(limit)
+    /// Favorites: show category breakdown by actual place categories
+    private func favoritesRawInsights() -> [TagWeight] {
+        var categoryCounts: [String: Int] = [:]
+        for fav in favoritesManager.favorites {
+            categoryCounts[fav.category.displayName, default: 0] += 1
+        }
+        return topWeighted(from: categoryCounts)
+    }
+
+    /// Spotify: show raw genre strings from top artists (no mapper)
+    private func spotifyRawInsights(_ spotify: SpotifyIntegrationManager) -> [TagWeight] {
+        var genreCounts: [String: Int] = [:]
+        for (i, artist) in spotify.topArtists.enumerated() {
+            let weight = max(1, 10 - i / 5)
+            for genre in artist.genres {
+                genreCounts[genre, default: 0] += weight
+            }
+        }
+        return topWeighted(from: genreCounts)
+    }
+
+    /// Apple Music: show raw genre names from library, artists, and recently played
+    private func appleMusicRawInsights(_ appleMusic: AppleMusicIntegrationManager) -> [TagWeight] {
+        var genreCounts: [String: Int] = [:]
+        for (genre, count) in appleMusic.libraryGenres {
+            genreCounts[genre, default: 0] += count
+        }
+        for track in appleMusic.recentlyPlayed {
+            for genre in track.genreNames {
+                genreCounts[genre, default: 0] += 2
+            }
+        }
+        // Also pull from library artists if genres are sparse
+        for artist in appleMusic.libraryArtists {
+            for genre in artist.genres {
+                genreCounts[genre, default: 0] += 1
+            }
+        }
+        return topWeighted(from: genreCounts)
+    }
+
+    /// Photos: show matched place names vs unmatched (by cluster count)
+    private func photosRawInsights() -> [TagWeight] {
+        let nonHome = photosManager.clusters.filter { $0.category != .home }
+        guard !nonHome.isEmpty else { return [] }
+
+        let matched = nonHome.filter { $0.inferredName != nil && !$0.inferredName!.isEmpty && $0.category != .other }
+        let unmatchedCount = nonHome.count - matched.count
+        let total = Float(nonHome.count)
+
+        // Top 5 matched places sorted by photo count
+        var results: [TagWeight] = matched
+            .sorted { $0.photoCount > $1.photoCount }
+            .prefix(5)
+            .enumerated()
+            .map { _, cluster in
+                TagWeight(tag: cluster.inferredName!, weight: 1.0 / total)
+            }
+
+        // Distribute matched portion evenly across shown places
+        if !results.isEmpty {
+            let matchedShare = Float(matched.count) / total
+            let perSlice = matchedShare / Float(results.count)
+            results = results.map { TagWeight(tag: $0.tag, weight: perSlice) }
+        }
+
+        if unmatchedCount > 0 {
+            results.append(TagWeight(
+                tag: "\(unmatchedCount) unresolved",
+                weight: Float(unmatchedCount) / total
+            ))
+        }
+
+        return results
+    }
+
+    private func topWeighted(from counts: [String: Int], limit: Int = 6) -> [TagWeight] {
+        let sorted = counts.sorted { $0.value > $1.value }.prefix(limit)
         let total = Float(sorted.reduce(0) { $0 + $1.value })
         guard total > 0 else { return [] }
         return sorted.map { TagWeight(tag: $0.key, weight: Float($0.value) / total) }
@@ -677,6 +750,90 @@ struct FlowLayout: Layout {
         }
 
         return (positions, CGSize(width: maxX, height: y + rowHeight))
+    }
+}
+
+// MARK: - Donut Skeleton
+
+struct DonutSkeletonView: View {
+    @State private var shimmer = false
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 24) {
+            // Skeleton donut ring
+            Circle()
+                .stroke(Color(UIColor.quaternarySystemFill), lineWidth: 14)
+                .frame(width: 64, height: 64)
+
+            // Skeleton legend rows
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(0..<4, id: \.self) { i in
+                    HStack(spacing: 8) {
+                        Circle()
+                            .fill(Color(UIColor.quaternarySystemFill))
+                            .frame(width: 8, height: 8)
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(Color(UIColor.quaternarySystemFill))
+                            .frame(width: CGFloat([90, 70, 110, 60][i]), height: 10)
+                        Spacer()
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(Color(UIColor.quaternarySystemFill))
+                            .frame(width: 28, height: 10)
+                    }
+                }
+            }
+        }
+        .opacity(shimmer ? 0.4 : 1.0)
+        .animation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true), value: shimmer)
+        .onAppear { shimmer = true }
+    }
+}
+
+// MARK: - Reusable Donut Chart
+
+struct DonutChartView: View {
+    let tags: [InterestVectorManager.TagWeight]
+    var size: CGFloat = 72
+    var lineWidth: CGFloat = 16
+
+    private let colors: [Color] = [.purple, .blue, .cyan, .teal, .green, .orange, .red, .indigo, .mint, .yellow]
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 24) {
+            ZStack {
+                ForEach(Array(tags.enumerated()), id: \.offset) { i, tagWeight in
+                    let start = tags.prefix(i).reduce(Float(0)) { $0 + $1.weight }
+                    let end = start + tagWeight.weight
+                    Circle()
+                        .trim(from: CGFloat(start), to: CGFloat(end))
+                        .stroke(
+                            colors[i % colors.count].gradient,
+                            style: StrokeStyle(lineWidth: lineWidth, lineCap: .butt)
+                        )
+                        .rotationEffect(.degrees(-90))
+                }
+            }
+            .frame(width: size, height: size)
+
+            VStack(alignment: .leading, spacing: 5) {
+                ForEach(Array(tags.enumerated()), id: \.offset) { i, tagWeight in
+                    HStack(spacing: 8) {
+                        Circle()
+                            .fill(colors[i % colors.count])
+                            .frame(width: 8, height: 8)
+                        Text(tagWeight.tag.capitalized.replacingOccurrences(of: "_", with: " "))
+                            .font(.caption)
+                            .fontWeight(.medium)
+                            .lineLimit(1)
+                        Spacer()
+                        Text("\(Int(tagWeight.weight * 100))%")
+                            .font(.caption2)
+                            .fontWeight(.semibold)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
     }
 }
 

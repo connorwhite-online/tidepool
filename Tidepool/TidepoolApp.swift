@@ -12,7 +12,12 @@ import UIKit
 struct TidepoolApp: App {
     @StateObject private var favoritesManager = InAppFavoritesManager()
 
+    @Environment(\.scenePhase) private var scenePhase
+
     init() {
+        // Register background task for visit uploads
+        VisitDetector.shared.registerBackgroundTask()
+
         // UINavigationBar titles
         let navAppearance = UINavigationBarAppearance()
         if let titleDescriptor = UIFontDescriptor.preferredFontDescriptor(withTextStyle: .headline).withDesign(.rounded) {
@@ -42,6 +47,17 @@ struct TidepoolApp: App {
                 .environmentObject(favoritesManager)
                 .fontDesign(.rounded)
                 .environment(\.font, .system(.body, design: .rounded))
+                .onChange(of: scenePhase) { _, newPhase in
+                    switch newPhase {
+                    case .active:
+                        VisitDetector.shared.startBatchUploads()
+                    case .background:
+                        VisitDetector.shared.stopBatchUploads()
+                        VisitDetector.shared.scheduleBackgroundUpload()
+                    default:
+                        break
+                    }
+                }
         }
     }
 }
