@@ -569,14 +569,46 @@ final class ForYouRecommendationLoader: ObservableObject {
         }
     }
 
-    // MARK: - Server-backed (blended scoring)
+    // MARK: - Server-backed (aligned-user recommendations)
 
     private func loadFromServer(favorites: [FavoriteLocation], near center: CLLocationCoordinate2D) {
-        // Build queries from top favorite categories
-        var categoryCounts: [PlaceCategory: Int] = [:]
-        for fav in favorites {
-            categoryCounts[fav.category, default: 0] += 1
+        Task { @MainActor in
+            do {
+                let calendar = Calendar.current
+                let now = Date()
+                let request = RecommendationRequest(
+                    location: Coordinate(latitude: center.latitude, longitude: center.longitude),
+                    currentHour: calendar.component(.hour, from: now),
+                    currentDayOfWeek: calendar.component(.weekday, from: now) - 1,
+                    limit: 12
+                )
+                let response = try await BackendClient.shared.getRecommendations(request)
+
+                if response.recommendations.isEmpty {
+                    // No aligned-user data yet — fall back to blended search
+                    loadFromBlendedSearch(favorites: favorites, near: center)
+                    return
+                }
+
+                self.recommendations = response.recommendations.map { rec in
+                    let placemark = MKPlacemark(coordinate: CLLocationCoordinate2D(
+                        latitude: rec.latitude, longitude: rec.longitude
+                    ))
+                    let item = MKMapItem(placemark: placemark)
+                    item.name = rec.name
+                    return item
+                }
+                self.isLoading = false
+            } catch {
+                print("[ForYou] recommendations failed, falling back to search: \(error.localizedDescription)")
+                loadFromBlendedSearch(favorites: favorites, near: center)
+            }
         }
+    }
+
+    private func loadFromBlendedSearch(favorites: [FavoriteLocation], near center: CLLocationCoordinate2D) {
+        var categoryCounts: [PlaceCategory: Int] = [:]
+        for fav in favorites { categoryCounts[fav.category, default: 0] += 1 }
         let topCategory = categoryCounts.sorted { $0.value > $1.value }.first?.key ?? .restaurant
         let queryMap: [PlaceCategory: String] = [
             .restaurant: "restaurant", .cafe: "coffee cafe", .bar: "bar cocktails",
@@ -590,24 +622,17 @@ final class ForYouRecommendationLoader: ObservableObject {
                 let request = PlaceSearchRequest(
                     query: query,
                     location: Coordinate(latitude: center.latitude, longitude: center.longitude),
-                    radiusKm: 5.0,
-                    limit: 12
+                    radiusKm: 5.0, limit: 12
                 )
                 let response = try await BackendClient.shared.searchPlaces(request)
-
-                // Filter out already-favorited places
                 let favIDs = Set(favorites.map { $0.placeId })
                 let filtered = response.results.filter { result in
                     let pid = "\(result.name)_\(String(format: "%.5f", result.location.latitude))_\(String(format: "%.5f", result.location.longitude))"
                     return !favIDs.contains(pid)
                 }
-
-                self.serverResults = Array(filtered.prefix(12))
-                // Also create MKMapItems for compatibility with existing card UI
                 self.recommendations = filtered.prefix(12).map { result in
                     let placemark = MKPlacemark(coordinate: CLLocationCoordinate2D(
-                        latitude: result.location.latitude,
-                        longitude: result.location.longitude
+                        latitude: result.location.latitude, longitude: result.location.longitude
                     ))
                     let item = MKMapItem(placemark: placemark)
                     item.name = result.name
@@ -615,7 +640,6 @@ final class ForYouRecommendationLoader: ObservableObject {
                 }
                 self.isLoading = false
             } catch {
-                print("[ForYou] server search failed, falling back to MapKit: \(error.localizedDescription)")
                 loadFromMapKit(favorites: favorites, near: center)
             }
         }

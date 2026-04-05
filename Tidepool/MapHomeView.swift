@@ -17,6 +17,12 @@ struct MapHomeView: View {
     // POI annotations are now handled natively by MapKit
     @State private var heatFetchTask: Task<Void, Never>?
     @State private var lastFetchedTileSet: Set<String> = []
+    @State private var heatMode: HeatMode = .forYou
+
+    enum HeatMode: String, CaseIterable {
+        case live = "Live"
+        case forYou = "For You"
+    }
     // Hysteresis thresholds to prevent rapid toggling near boundary
     private let homeHideInnerRadiusMeters: CLLocationDistance = 137.16 // 450 ft
     private let homeShowOuterRadiusMeters: CLLocationDistance = 167.64 // 550 ft
@@ -61,6 +67,25 @@ struct MapHomeView: View {
                 }
             )
             .ignoresSafeArea()
+        }
+        .overlay(alignment: .topTrailing) {
+            // Heat mode toggle
+            Picker("Heat", selection: $heatMode) {
+                ForEach(HeatMode.allCases, id: \.self) { mode in
+                    Text(mode.rawValue).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 140)
+            .padding(8)
+            .background(.ultraThinMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .padding(.trailing, 12)
+            .padding(.top, 60)
+        }
+        .onChange(of: heatMode) { _, _ in
+            // Force re-fetch on mode change
+            lastFetchedTileSet = []
         }
         .overlay(alignment: .bottomTrailing) {
             if showTileHUD {
@@ -192,13 +217,26 @@ struct MapHomeView: View {
         guard tileSet != lastFetchedTileSet else { return }
         lastFetchedTileSet = tileSet
 
-        let request = HeatTileRequest(
-            viewport: Viewport(ne: ne, sw: sw),
-            viewerVector: nil
-        )
+        let viewport = Viewport(ne: ne, sw: sw)
 
         do {
-            let response = try await BackendClient.shared.fetchHeatTiles(request)
+            let response: HeatTileResponse
+            switch heatMode {
+            case .live:
+                response = try await BackendClient.shared.fetchHeatTiles(
+                    HeatTileRequest(viewport: viewport, viewerVector: nil)
+                )
+            case .forYou:
+                let calendar = Calendar.current
+                let now = Date()
+                response = try await BackendClient.shared.fetchAlignedHeat(
+                    AlignedHeatRequest(
+                        viewport: viewport,
+                        currentHour: calendar.component(.hour, from: now),
+                        currentDayOfWeek: calendar.component(.weekday, from: now) - 1
+                    )
+                )
+            }
             let groups = response.tiles.compactMap { tile -> HeatBlobGroup? in
                 guard let center = coordinateFromTileID(tile.tileID) else { return nil }
                 let points = syntheticPoints(around: center, count: tile.contributorCount)

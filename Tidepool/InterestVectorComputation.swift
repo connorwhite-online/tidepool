@@ -75,7 +75,7 @@ class InterestVectorManager: ObservableObject {
         uploadVectorToServer()
     }
 
-    /// Upload the computed vector to the backend for cross-device sync and similarity search.
+    /// Upload multi-vector payload to the backend.
     private func uploadVectorToServer() {
         guard !currentVector.isEmpty else { return }
 
@@ -87,21 +87,77 @@ class InterestVectorManager: ObservableObject {
         case .excellent: qualityString = "excellent"
         }
 
-        let request = ProfileVectorRequest(
-            vector: currentVector,
+        // Collect raw music genres (preserving granularity)
+        let musicGenres = collectRawMusicGenres()
+
+        // Collect place POI frequencies from visit history + favorites
+        let placePois = collectPlacePois()
+
+        let multiRequest = MultiVectorRequest(
+            musicGenres: musicGenres,
+            placePois: placePois,
+            vibeVector: currentVector,
             quality: qualityString,
             activeSources: getActiveDataSources()
         )
 
         Task {
             do {
-                let _ = try await BackendClient.shared.uploadVector(request)
-                print("[InterestVectorManager] Vector uploaded to server (v\(currentVector.count) dims)")
+                let _ = try await BackendClient.shared.uploadMultiVector(multiRequest)
+                print("[InterestVectorManager] Multi-vector uploaded (music: \(musicGenres.count) genres, places: \(placePois.count) POIs, vibe: \(currentVector.count) dims)")
             } catch {
-                // Non-fatal — local vector is still saved
-                print("[InterestVectorManager] Server upload failed: \(error.localizedDescription)")
+                // Fallback: try legacy single-vector upload
+                let legacyRequest = ProfileVectorRequest(
+                    vector: currentVector,
+                    quality: qualityString,
+                    activeSources: getActiveDataSources()
+                )
+                let _ = try? await BackendClient.shared.uploadVector(legacyRequest)
+                print("[InterestVectorManager] Multi-vector failed, legacy fallback: \(error.localizedDescription)")
             }
         }
+    }
+
+    /// Collect raw genre strings with weights from Spotify + Apple Music (no mapper flattening).
+    private func collectRawMusicGenres() -> [String: Float] {
+        var genres: [String: Float] = [:]
+
+        // Spotify: raw artist genres with position weighting
+        if let spotify = spotifyManager {
+            for (i, artist) in spotify.topArtists.enumerated() {
+                let weight = Float(max(1, 10 - i / 5))
+                for genre in artist.genres {
+                    genres[genre.lowercased(), default: 0] += weight
+                }
+            }
+        }
+
+        // Apple Music: raw genre names from library
+        if let appleMusic = appleMusicManager {
+            for (genre, count) in appleMusic.libraryGenres {
+                genres[genre.lowercased(), default: 0] += Float(min(count, 10))
+            }
+            // Recently played bonus
+            for track in appleMusic.recentlyPlayed {
+                for genre in track.genreNames {
+                    genres[genre.lowercased(), default: 0] += 2.0
+                }
+            }
+        }
+
+        return genres
+    }
+
+    /// Collect POI visit frequencies from VisitDetector + favorites.
+    private func collectPlacePois() -> [String: Float] {
+        var pois: [String: Float] = [:]
+
+        // From favorites (boolean signal — 1.0 per favorite)
+        for fav in favoritesManager.favorites {
+            pois[fav.placeId, default: 0] += 1.0
+        }
+
+        return pois
     }
     
     private func aggregateTagsFromAllSources() -> [String: Float] {
