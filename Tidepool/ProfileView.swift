@@ -57,13 +57,19 @@ struct ProfileView: View {
 
     @ViewBuilder
     private var formContent: some View {
-        Form {
-            locationSection
-            integrationsSection
-            interestProfileSection
-            favoritesSection
-            privacySection
+        ScrollView {
+            VStack(spacing: 20) {
+                integrationsCard
+                interestProfileCard
+                favoritesCard
+                locationCard
+                privacyCard
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 8)
+            .padding(.bottom, 40)
         }
+        .background(Color(UIColor.systemGroupedBackground))
     }
 
     @ToolbarContentBuilder
@@ -532,6 +538,473 @@ struct ProfileView: View {
             Label("Anonymous presence only", systemImage: "shield.lefthalf.filled")
             Label("K-anonymity & DP on aggregates", systemImage: "checkerboard.shield")
         }
+    }
+
+    // MARK: - Card Components
+
+    private var integrationsCard: some View {
+        VStack(spacing: 0) {
+            // Header
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Integrations")
+                    .font(.title3)
+                    .fontWeight(.bold)
+                Text("Connect your interests to help Tidepool find your place")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 20)
+            .padding(.top, 20)
+            .padding(.bottom, 14)
+
+            // Integration pills
+            VStack(spacing: 10) {
+                // Birthday
+                integrationPill(icon: "birthday.cake.fill", title: "Birthday", tint: .pink) {
+                    if ageRangeManager.isAuthorized {
+                        Button {
+                            tempBirthday = ageRangeManager.birthday ?? Date()
+                            showingBirthdayPicker = true
+                        } label: {
+                            connectedBadge(text: ageRangeManager.displayAge)
+                        }
+                        .buttonStyle(.plain)
+                    } else {
+                        connectButton { tempBirthday = Calendar.current.date(byAdding: .year, value: -25, to: Date()) ?? Date(); showingBirthdayPicker = true }
+                    }
+                }
+
+                // Spotify
+                integrationPill(icon: "waveform", title: "Spotify", tint: .green) {
+                    if spotifyManager.isConnected && spotifyManager.isSyncing {
+                        syncingBadge
+                    } else if spotifyManager.isConnected {
+                        connectedMenu(
+                            summary: spotifyManager.getSummary(),
+                            onRefresh: { Task { await spotifyManager.refreshData() } },
+                            onDisconnect: { spotifyManager.disconnect() }
+                        )
+                    } else {
+                        connectButton { Task { await spotifyManager.authenticate() } }
+                    }
+                }
+
+                // Apple Music
+                integrationPill(icon: "music.note", title: "Apple Music", tint: .red) {
+                    if appleMusicManager.isAuthorized && appleMusicManager.isSyncing {
+                        syncingBadge
+                    } else if appleMusicManager.isAuthorized {
+                        connectedMenu(
+                            summary: appleMusicManager.getSummary(),
+                            onRefresh: { Task { await appleMusicManager.refreshData() } },
+                            onDisconnect: { appleMusicManager.disconnect() }
+                        )
+                    } else {
+                        connectButton { Task { await appleMusicManager.requestAuthorization() } }
+                    }
+                }
+
+                // Photos
+                integrationPill(icon: "photo.fill", title: "Photos", tint: .orange) {
+                    if photosManager.isEnabled && photosManager.isProcessing {
+                        syncingBadge
+                    } else if photosManager.isEnabled {
+                        connectedMenu(
+                            summary: photosManager.getPlacesSummary(),
+                            onRefresh: { Task { await photosManager.refreshData() } },
+                            onDisconnect: { disconnectPhotos() }
+                        )
+                    } else {
+                        connectButton { connectPhotos() }
+                    }
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 20)
+        }
+        .background(.regularMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .shadow(color: .blue.opacity(0.08), radius: 12, y: 4)
+    }
+
+    private func integrationPill<T: View>(icon: String, title: String, tint: Color, @ViewBuilder trailing: () -> T) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 38, height: 38)
+                .background(tint.gradient)
+                .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                .shadow(color: tint.opacity(0.3), radius: 4, y: 2)
+
+            Text(title)
+                .font(.subheadline)
+                .fontWeight(.semibold)
+
+            Spacer()
+
+            trailing()
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(Color(UIColor.secondarySystemGroupedBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private func connectButton(action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text("Connect")
+                .font(.caption)
+                .fontWeight(.bold)
+                .foregroundStyle(.white)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .background(
+                    LinearGradient(colors: [.blue, .cyan], startPoint: .leading, endPoint: .trailing)
+                )
+                .clipShape(Capsule())
+                .shadow(color: .blue.opacity(0.25), radius: 4, y: 2)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func connectedMenu(summary: String?, onRefresh: @escaping () -> Void, onDisconnect: @escaping () -> Void) -> some View {
+        Menu {
+            Button { onRefresh() } label: {
+                Label("Refresh Data", systemImage: "arrow.clockwise")
+            }
+            Divider()
+            Button(role: .destructive) { onDisconnect() } label: {
+                Label("Disconnect", systemImage: "xmark.circle")
+            }
+        } label: {
+            VStack(alignment: .trailing, spacing: 2) {
+                HStack(spacing: 4) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.green)
+                    Text("Connected")
+                        .font(.caption)
+                        .fontWeight(.medium)
+                        .foregroundStyle(.green)
+                    Image(systemName: "chevron.down")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+                if let summary {
+                    Text(summary)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+        }
+    }
+
+    private func connectedBadge(text: String) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: "checkmark.circle.fill")
+                .font(.caption2)
+            Text(text)
+                .font(.caption)
+                .fontWeight(.medium)
+                .lineLimit(1)
+        }
+        .foregroundStyle(.green)
+    }
+
+    private var syncingBadge: some View {
+        HStack(spacing: 6) {
+            ProgressView()
+                .controlSize(.mini)
+            Text("Syncing")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var interestProfileCard: some View {
+        VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Your Taste")
+                    .font(.title3)
+                    .fontWeight(.bold)
+                Text("What makes you, you")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 20)
+            .padding(.top, 20)
+            .padding(.bottom, 8)
+
+            if let vectorManager = vectorManager {
+                InterestVectorView(vectorManager: vectorManager)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 20)
+            } else {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Building your taste profile...")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(20)
+            }
+        }
+        .background(.regularMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .shadow(color: .purple.opacity(0.08), radius: 12, y: 4)
+    }
+
+    private var favoritesCard: some View {
+        VStack(spacing: 12) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Favorites")
+                        .font(.title3)
+                        .fontWeight(.bold)
+                    Text("Places you love")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+
+                Button { showingPlaceSearch = true } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 32, height: 32)
+                        .background(
+                            LinearGradient(colors: [.pink, .orange], startPoint: .topLeading, endPoint: .bottomTrailing)
+                        )
+                        .clipShape(Circle())
+                        .shadow(color: .pink.opacity(0.3), radius: 4, y: 2)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 20)
+
+            let stats = favoritesManager.getStats()
+            if stats.totalFavorites > 0 {
+                Button { showingFavorites = true } label: {
+                    HStack(spacing: 16) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("\(stats.totalFavorites) saved places")
+                                .font(.subheadline)
+                                .fontWeight(.medium)
+                                .foregroundStyle(.primary)
+
+                            if let top = stats.topCategory {
+                                Text("Most loved: \(top.displayName)")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+
+                        Spacer()
+
+                        if stats.averageRating > 0 {
+                            HStack(spacing: 3) {
+                                Image(systemName: "star.fill")
+                                    .foregroundStyle(.yellow)
+                                Text(String(format: "%.1f", stats.averageRating))
+                                    .fontWeight(.semibold)
+                            }
+                            .font(.subheadline)
+                        }
+
+                        Image(systemName: "chevron.right")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
+                    .padding(16)
+                    .background(Color(UIColor.secondarySystemGroupedBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 16)
+            } else {
+                Text("Add places you love to build your taste profile")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 20)
+            }
+
+            Spacer().frame(height: 8)
+        }
+        .background(.regularMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .shadow(color: .orange.opacity(0.08), radius: 12, y: 4)
+    }
+
+    private var locationCard: some View {
+        VStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Location")
+                    .font(.title3)
+                    .fontWeight(.bold)
+                Text("How Tidepool sees the world around you")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 20)
+            .padding(.top, 20)
+
+            VStack(spacing: 8) {
+                locationSettingRow(icon: "location.fill", title: "Permission", tint: .blue) {
+                    HStack(spacing: 6) {
+                        Button("When In Use") { location.requestAuthorization() }
+                            .font(.caption2)
+                            .fontWeight(.semibold)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(Color.blue.opacity(0.12))
+                            .clipShape(Capsule())
+                        Button("Always") { location.requestAlwaysAuthorization() }
+                            .font(.caption2)
+                            .fontWeight(.semibold)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(Color.blue.opacity(0.12))
+                            .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.blue)
+                }
+
+                locationToggleRow(icon: "waveform.path.ecg", title: "Background updates", tint: .purple, isOn: $backgroundEnabled)
+
+                locationToggleRow(icon: "bolt.slash.fill", title: "Reduced accuracy", tint: .yellow, isOn: $reducedAccuracy)
+
+                locationSettingRow(icon: "house.fill", title: "Home", tint: .orange) {
+                    Button(location.homeLocation == nil ? "Set" : "Update") { showingHomePicker = true }
+                        .font(.caption)
+                        .fontWeight(.semibold)
+                        .foregroundStyle(.orange)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 20)
+        }
+        .background(.regularMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .shadow(color: .indigo.opacity(0.06), radius: 12, y: 4)
+    }
+
+    private func locationSettingRow<T: View>(icon: String, title: String, tint: Color, @ViewBuilder trailing: () -> T) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 32, height: 32)
+                .background(tint.gradient)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+            Text(title)
+                .font(.subheadline)
+
+            Spacer()
+
+            trailing()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(Color(UIColor.secondarySystemGroupedBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    private func locationToggleRow(icon: String, title: String, tint: Color, isOn: Binding<Bool>) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 32, height: 32)
+                .background(tint.gradient)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+            Text(title)
+                .font(.subheadline)
+
+            Spacer()
+
+            Toggle("", isOn: isOn)
+                .labelsHidden()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 6)
+        .background(Color(UIColor.secondarySystemGroupedBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    private var privacyCard: some View {
+        VStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Privacy")
+                    .font(.title3)
+                    .fontWeight(.bold)
+                Text("Your data stays yours")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 20)
+            .padding(.top, 20)
+
+            VStack(spacing: 8) {
+                privacyBadge(
+                    icon: "shield.lefthalf.filled",
+                    tint: .green,
+                    title: "Fully anonymous",
+                    subtitle: "No accounts, no identity, no tracking"
+                )
+                privacyBadge(
+                    icon: "eye.slash.fill",
+                    tint: .blue,
+                    title: "Home protected",
+                    subtitle: "Presence hidden within 500 ft of home"
+                )
+                privacyBadge(
+                    icon: "lock.fill",
+                    tint: .purple,
+                    title: "Encrypted in transit",
+                    subtitle: "All data encrypted between device and server"
+                )
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 20)
+        }
+        .background(.regularMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .shadow(color: .green.opacity(0.06), radius: 12, y: 4)
+    }
+
+    private func privacyBadge(icon: String, tint: Color, title: String, subtitle: String) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 32, height: 32)
+                .background(tint.gradient)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.subheadline)
+                    .fontWeight(.medium)
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(Color(UIColor.secondarySystemGroupedBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 
     // MARK: - Actions

@@ -58,6 +58,7 @@ final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelega
 
     func setHome(to coordinate: CLLocationCoordinate2D) {
         homeLocation = coordinate
+        VisitDetector.shared.updateHomeLocation(coordinate)
     }
 
     private func loadHome() {
@@ -79,16 +80,24 @@ final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelega
         authorizationStatus = manager.authorizationStatus
         if authorizationStatus == .authorizedAlways || authorizationStatus == .authorizedWhenInUse {
             manager.startUpdatingLocation()
+            VisitDetector.shared.updateHomeLocation(homeLocation)
+            VisitDetector.shared.startBatchUploads()
         }
     }
 
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
         latestLocation = locations.last
+        // Feed location updates to dwell detection
+        if let location = locations.last {
+            VisitDetector.shared.processLocationUpdate(location)
+        }
     }
 
     func locationManager(_ manager: CLLocationManager, didVisit visit: CLVisit) {
         // Update latest location on visit events as a coarse signal
         let coord = visit.coordinate
         latestLocation = CLLocation(latitude: coord.latitude, longitude: coord.longitude)
+        // Forward to VisitDetector for POI snapping and tracking
+        VisitDetector.shared.processVisit(visit)
     }
 } 

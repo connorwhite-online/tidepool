@@ -259,8 +259,18 @@ enum PlaceCategory: String, Codable, CaseIterable {
             return ["books", "study", "quiet", "education"]
         case .grocery:
             return ["grocery", "convenience", "daily_life"]
+        case .hospital:
+            return ["convenient", "daily"]
+        case .school:
+            return ["daily", "social"]
+        case .gasStation:
+            return ["convenient", "daily"]
+        case .bank:
+            return ["convenient", "daily"]
+        case .hotel:
+            return ["social", "upscale"]
         default:
-            return ["general"]
+            return ["social", "local"]
         }
     }
 }

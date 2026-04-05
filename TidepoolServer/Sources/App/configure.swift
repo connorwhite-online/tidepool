@@ -44,6 +44,8 @@ func configure(_ app: Application) throws {
     app.migrations.add(CreateDevices())
     app.migrations.add(CreateDeviceProfiles())
     app.migrations.add(CreateFavorites())
+    app.migrations.add(CreateVisits())
+    app.migrations.add(AddMultiVectors())
 
     // MARK: - JWT
 

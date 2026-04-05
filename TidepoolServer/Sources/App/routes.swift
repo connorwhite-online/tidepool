@@ -23,4 +23,7 @@ func routes(_ app: Application) throws {
     try authenticated.grouped("favorites").register(collection: FavoritesController())
     try authenticated.grouped("profile").register(collection: SimilarController())
     try authenticated.grouped("profile").register(collection: TasteSummaryController())
+    try authenticated.grouped("visits").register(collection: VisitController())
+    try authenticated.grouped("tiles").register(collection: AlignedHeatController())
+    try authenticated.grouped("recommendations").register(collection: RecommendationController())
 }

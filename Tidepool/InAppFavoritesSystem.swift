@@ -483,17 +483,13 @@ struct FavoritesListView: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
                     Button("All") {
-                        withAnimation(SpringPhysics.standard.swiftUISpring) {
-                            favoritesManager.filterCategory = nil
-                        }
+                        favoritesManager.filterCategory = nil
                     }
                     .buttonStyle(FilterButtonStyle(isSelected: favoritesManager.filterCategory == nil))
-                    
+
                     ForEach(uniqueCategories, id: \.self) { category in
                         Button(category.displayName) {
-                            withAnimation(SpringPhysics.standard.swiftUISpring) {
-                                favoritesManager.filterCategory = category
-                            }
+                            favoritesManager.filterCategory = category
                         }
                         .buttonStyle(FilterButtonStyle(isSelected: favoritesManager.filterCategory == category))
                     }
@@ -530,20 +526,17 @@ struct FavoritesListView: View {
     
     private var favoritesList: some View {
         List {
-            ForEach(favoritesManager.filteredAndSortedFavorites.indices, id: \.self) { index in
-                let favorite = favoritesManager.filteredAndSortedFavorites[index]
+            ForEach(favoritesManager.filteredAndSortedFavorites, id: \.id) { favorite in
                 FavoriteRowView(favorite: favorite, favoritesManager: favoritesManager)
-                    .staggeredAnimation(delay: Double(index) * 0.05)
                     .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                         Button("Delete", role: .destructive) {
-                            withAnimation(SpringPhysics.standard.swiftUISpring) {
-                                favoritesManager.removeFavorite(for: favorite.placeId)
-                            }
+                            favoritesManager.removeFavorite(for: favorite.placeId)
                         }
                     }
             }
         }
         .listStyle(.plain)
+        .animation(.default, value: favoritesManager.filterCategory)
     }
 }
 
@@ -632,17 +625,18 @@ struct FavoriteRowView: View {
 
 struct FilterButtonStyle: ButtonStyle {
     let isSelected: Bool
-    
+
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.caption)
+            .fontWeight(.medium)
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
             .background(isSelected ? Color.blue : Color(UIColor.quaternarySystemFill))
-            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .clipShape(Capsule())
             .foregroundStyle(isSelected ? .white : .primary)
             .scaleEffect(configuration.isPressed ? 0.95 : 1.0)
-            .animation(SpringPhysics.snappy.swiftUISpring, value: configuration.isPressed)
+            .animation(.easeOut(duration: 0.15), value: configuration.isPressed)
     }
 }
 

@@ -40,7 +40,7 @@ struct ContentView: View {
                 if selectedLocationDetail == nil {
                     floatingBottomBar
                         .padding(.horizontal, 16)
-                        .padding(.bottom, 32)
+                        .padding(.bottom, 12)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
 

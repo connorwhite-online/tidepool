@@ -137,6 +137,32 @@ class BackendClient: ObservableObject {
         try await request(method: "GET", path: "/v1/profile/taste-summary")
     }
 
+    // MARK: - Visits
+
+    func uploadVisits(_ body: VisitBatchRequest) async throws -> VisitBatchResponse {
+        try await request(method: "POST", path: "/v1/visits/batch", body: body)
+    }
+
+    func getVisitPatterns() async throws -> VisitPatternResponse {
+        try await request(method: "GET", path: "/v1/visits/patterns")
+    }
+
+    // MARK: - Aligned Heat & Recommendations
+
+    func fetchAlignedHeat(_ body: AlignedHeatRequest) async throws -> HeatTileResponse {
+        try await request(method: "POST", path: "/v1/tiles/aligned-heat", body: body)
+    }
+
+    func getRecommendations(_ body: RecommendationRequest) async throws -> RecommendationResponse {
+        try await request(method: "POST", path: "/v1/recommendations", body: body)
+    }
+
+    // MARK: - Multi-Vector Profile
+
+    func uploadMultiVector(_ body: MultiVectorRequest) async throws -> ProfileVectorResponse {
+        try await request(method: "PUT", path: "/v1/profile/vectors", body: body)
+    }
+
     // MARK: - Presence
 
     func reportPresence(_ report: PresenceReport) async throws -> PresenceResponse {

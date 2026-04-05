@@ -404,3 +404,169 @@ public struct TasteSummaryResponse: Codable, Sendable {
         case generatedAt = "generated_at"
     }
 }
+
+// MARK: - Visits
+
+public struct VisitReport: Codable, Sendable {
+    public let poiId: String?
+    public let yelpId: String?
+    public let name: String
+    public let category: PlaceCategory
+    public let latitude: Double
+    public let longitude: Double
+    public let arrivedAt: String
+    public let departedAt: String
+    public let dayOfWeek: Int
+    public let hourOfDay: Int
+    public let durationMinutes: Int
+    public let confidence: Float
+    public let source: String
+
+    public init(poiId: String?, yelpId: String?, name: String, category: PlaceCategory,
+                latitude: Double, longitude: Double, arrivedAt: String, departedAt: String,
+                dayOfWeek: Int, hourOfDay: Int, durationMinutes: Int,
+                confidence: Float = 1.0, source: String = "visit") {
+        self.poiId = poiId; self.yelpId = yelpId; self.name = name; self.category = category
+        self.latitude = latitude; self.longitude = longitude
+        self.arrivedAt = arrivedAt; self.departedAt = departedAt
+        self.dayOfWeek = dayOfWeek; self.hourOfDay = hourOfDay
+        self.durationMinutes = durationMinutes; self.confidence = confidence; self.source = source
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case poiId = "poi_id", yelpId = "yelp_id", name, category, latitude, longitude
+        case arrivedAt = "arrived_at", departedAt = "departed_at"
+        case dayOfWeek = "day_of_week", hourOfDay = "hour_of_day"
+        case durationMinutes = "duration_minutes", confidence, source
+    }
+}
+
+public struct VisitBatchRequest: Codable, Sendable {
+    public let visits: [VisitReport]
+    public init(visits: [VisitReport]) { self.visits = visits }
+}
+
+public struct VisitBatchResponse: Codable, Sendable {
+    public let accepted: Int
+    public let duplicates: Int
+    public init(accepted: Int, duplicates: Int) { self.accepted = accepted; self.duplicates = duplicates }
+}
+
+public struct VisitPattern: Codable, Sendable {
+    public let poiId: String?
+    public let name: String
+    public let category: PlaceCategory
+    public let latitude: Double
+    public let longitude: Double
+    public let visitCount: Int
+    public let avgDurationMinutes: Int
+    public let typicalDays: [Int]
+    public let typicalHours: [Int]
+    public let lastVisit: String
+
+    public init(poiId: String?, name: String, category: PlaceCategory,
+                latitude: Double, longitude: Double, visitCount: Int,
+                avgDurationMinutes: Int, typicalDays: [Int], typicalHours: [Int], lastVisit: String) {
+        self.poiId = poiId; self.name = name; self.category = category
+        self.latitude = latitude; self.longitude = longitude; self.visitCount = visitCount
+        self.avgDurationMinutes = avgDurationMinutes; self.typicalDays = typicalDays
+        self.typicalHours = typicalHours; self.lastVisit = lastVisit
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case poiId = "poi_id", name, category, latitude, longitude
+        case visitCount = "visit_count", avgDurationMinutes = "avg_duration_minutes"
+        case typicalDays = "typical_days", typicalHours = "typical_hours"
+        case lastVisit = "last_visit"
+    }
+}
+
+public struct VisitPatternResponse: Codable, Sendable {
+    public let patterns: [VisitPattern]
+    public init(patterns: [VisitPattern]) { self.patterns = patterns }
+}
+
+// MARK: - Multi-Vector Profile
+
+public struct MultiVectorRequest: Codable, Sendable {
+    public let musicGenres: [String: Float]
+    public let placePois: [String: Float]
+    public let vibeVector: [Float]
+    public let quality: String
+    public let activeSources: [String]
+
+    public init(musicGenres: [String: Float], placePois: [String: Float], vibeVector: [Float],
+                quality: String, activeSources: [String]) {
+        self.musicGenres = musicGenres; self.placePois = placePois; self.vibeVector = vibeVector
+        self.quality = quality; self.activeSources = activeSources
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case musicGenres = "music_genres", placePois = "place_pois"
+        case vibeVector = "vibe_vector", quality, activeSources = "active_sources"
+    }
+}
+
+// MARK: - Aligned Heat
+
+public struct AlignedHeatRequest: Codable, Sendable {
+    public let viewport: Viewport
+    public let currentHour: Int
+    public let currentDayOfWeek: Int
+
+    public init(viewport: Viewport, currentHour: Int, currentDayOfWeek: Int) {
+        self.viewport = viewport; self.currentHour = currentHour; self.currentDayOfWeek = currentDayOfWeek
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case viewport, currentHour = "current_hour", currentDayOfWeek = "current_day_of_week"
+    }
+}
+
+// MARK: - Recommendations
+
+public struct RecommendationRequest: Codable, Sendable {
+    public let location: Coordinate
+    public let currentHour: Int
+    public let currentDayOfWeek: Int
+    public let limit: Int?
+
+    public init(location: Coordinate, currentHour: Int, currentDayOfWeek: Int, limit: Int? = nil) {
+        self.location = location; self.currentHour = currentHour
+        self.currentDayOfWeek = currentDayOfWeek; self.limit = limit
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case location, currentHour = "current_hour", currentDayOfWeek = "current_day_of_week", limit
+    }
+}
+
+public struct RecommendedPlace: Codable, Sendable {
+    public let poiId: String?
+    public let yelpId: String?
+    public let name: String
+    public let category: PlaceCategory
+    public let latitude: Double
+    public let longitude: Double
+    public let score: Float
+    public let alignedVisitors: Int
+    public let typicalHours: [Int]
+
+    public init(poiId: String?, yelpId: String?, name: String, category: PlaceCategory,
+                latitude: Double, longitude: Double, score: Float,
+                alignedVisitors: Int, typicalHours: [Int]) {
+        self.poiId = poiId; self.yelpId = yelpId; self.name = name; self.category = category
+        self.latitude = latitude; self.longitude = longitude; self.score = score
+        self.alignedVisitors = alignedVisitors; self.typicalHours = typicalHours
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case poiId = "poi_id", yelpId = "yelp_id", name, category, latitude, longitude, score
+        case alignedVisitors = "aligned_visitors", typicalHours = "typical_hours"
+    }
+}
+
+public struct RecommendationResponse: Codable, Sendable {
+    public let recommendations: [RecommendedPlace]
+    public init(recommendations: [RecommendedPlace]) { self.recommendations = recommendations }
+}
