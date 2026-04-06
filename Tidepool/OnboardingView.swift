@@ -57,7 +57,7 @@ struct OnboardingView: View {
             }
             .navigationBarHidden(true)
             .sheet(isPresented: $showingHomePicker) {
-                SimpleHomePicker(current: location.homeLocation) { coord in
+                SimpleHomePicker(current: location.homeLocation) { coord, _ in
                     location.setHome(to: coord)
                 }
             }

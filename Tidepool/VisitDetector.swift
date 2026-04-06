@@ -109,29 +109,21 @@ final class VisitDetector: NSObject {
         guard duration >= minDwellSeconds else { return }
         guard duration < 86400 else { return } // skip visits longer than 24 hours (bogus)
 
-        // Home exclusion
-        if let home = homeLocation {
-            let homeCL = CLLocation(latitude: home.latitude, longitude: home.longitude)
-            let visitCL = CLLocation(latitude: visit.coordinate.latitude, longitude: visit.coordinate.longitude)
-            if visitCL.distance(from: homeCL) < homeHideRadiusMeters { return }
-        }
+        // Home + hidden places exclusion
+        let visitCL = CLLocation(latitude: visit.coordinate.latitude, longitude: visit.coordinate.longitude)
+        if isInExclusionZone(visitCL) { return }
 
-        let location = CLLocation(latitude: visit.coordinate.latitude, longitude: visit.coordinate.longitude)
-        snapToPOI(location: location, arrivedAt: visit.arrivalDate, departedAt: visit.departureDate, confidence: 1.0, source: "visit")
+        snapToPOI(location: visitCL, arrivedAt: visit.arrivalDate, departedAt: visit.departureDate, confidence: 1.0, source: "visit")
     }
 
     // MARK: - Dwell Detection (secondary signal from didUpdateLocations)
 
     /// Call from LocationManager.didUpdateLocations to detect stationary dwell.
     func processLocationUpdate(_ location: CLLocation) {
-        // Home exclusion
-        if let home = homeLocation {
-            let homeCL = CLLocation(latitude: home.latitude, longitude: home.longitude)
-            if location.distance(from: homeCL) < homeHideRadiusMeters {
-                dwellLocation = nil
-                dwellStart = nil
-                return
-            }
+        if isInExclusionZone(location) {
+            dwellLocation = nil
+            dwellStart = nil
+            return
         }
 
         if let dwellLoc = dwellLocation, let start = dwellStart {
@@ -230,6 +222,26 @@ final class VisitDetector: NSObject {
                 }
             }
         }
+    }
+
+    /// Check if a location falls within any exclusion zone (home + hidden places).
+    private func isInExclusionZone(_ location: CLLocation) -> Bool {
+        // Home check
+        if let home = homeLocation {
+            let homeCL = CLLocation(latitude: home.latitude, longitude: home.longitude)
+            if location.distance(from: homeCL) < homeHideRadiusMeters { return true }
+        }
+
+        // Hidden places check
+        if let data = UserDefaults.standard.data(forKey: "hidden_places_data"),
+           let places = try? JSONDecoder().decode([HiddenPlace].self, from: data) {
+            for place in places {
+                let placeCL = CLLocation(latitude: place.latitude, longitude: place.longitude)
+                if location.distance(from: placeCL) < homeHideRadiusMeters { return true }
+            }
+        }
+
+        return false
     }
 
     private func inferCategory(from placemark: CLPlacemark) -> PlaceCategory {

@@ -30,6 +30,9 @@ struct ProfileView: View {
     @State private var isLoadingVisits = false
     @State private var pendingVisitCount: Int = 0
     @State private var showingPendingVisits = false
+    @State private var showingAddHiddenPlace = false
+    @AppStorage("home_address") private var homeAddress: String = ""
+    @AppStorage("hidden_places_data") private var hiddenPlacesData: Data = Data()
 
     var body: some View {
         mainForm
@@ -56,7 +59,10 @@ struct ProfileView: View {
                 photosDeniedAlert: $photosDeniedAlert,
                 location: location,
                 appleMapsManager: appleMapsManager,
-                favoritesManager: favoritesManager
+                favoritesManager: favoritesManager,
+                onHomeSet: { _, address in
+                    homeAddress = address
+                }
             ))
     }
 
@@ -1167,12 +1173,46 @@ struct ProfileView: View {
 
                 locationToggleRow(icon: "bolt.slash.fill", title: "Reduced accuracy", tint: .yellow, isOn: $reducedAccuracy)
 
-                locationSettingRow(icon: "house.fill", title: "Home", tint: .orange) {
-                    Button(location.homeLocation == nil ? "Set" : "Update") { showingHomePicker = true }
-                        .font(.caption)
-                        .fontWeight(.semibold)
-                        .foregroundStyle(.orange)
+                Button { showingHomePicker = true } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: "house.fill")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 32, height: 32)
+                            .background(Color.orange.gradient)
+                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Home")
+                                .font(.subheadline)
+                                .foregroundStyle(.primary)
+                            if !homeAddress.isEmpty {
+                                Text(homeAddress)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                        }
+
+                        Spacer()
+
+                        Image(systemName: location.homeLocation == nil ? "plus" : "pencil")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(.white)
+                            .frame(width: 28, height: 28)
+                            .background(LinearGradient(colors: [.blue, .cyan], startPoint: .topLeading, endPoint: .bottomTrailing))
+                            .clipShape(Circle())
+                            .shadow(color: .blue.opacity(0.3), radius: 4, y: 2)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(Color(UIColor.secondarySystemGroupedBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 }
+                .buttonStyle(.plain)
+
+                // Hidden places
+                hiddenPlacesSection
             }
             .padding(.horizontal, 16)
             .padding(.bottom, 20)
@@ -1180,6 +1220,85 @@ struct ProfileView: View {
         .background(.regularMaterial)
         .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
         .shadow(color: .indigo.opacity(0.06), radius: 12, y: 4)
+    }
+
+    // MARK: - Hidden Places
+
+    private var hiddenPlaces: [HiddenPlace] {
+        (try? JSONDecoder().decode([HiddenPlace].self, from: hiddenPlacesData)) ?? []
+    }
+
+    private func saveHiddenPlaces(_ places: [HiddenPlace]) {
+        hiddenPlacesData = (try? JSONEncoder().encode(places)) ?? Data()
+    }
+
+    private var hiddenPlacesSection: some View {
+        VStack(spacing: 8) {
+            ForEach(hiddenPlaces) { place in
+                HStack(spacing: 12) {
+                    Image(systemName: "eye.slash.fill")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 32, height: 32)
+                        .background(Color.purple.gradient)
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(place.name)
+                            .font(.subheadline)
+                            .fontWeight(.medium)
+                        Text(place.address)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+
+                    Spacer()
+
+                    Button {
+                        var places = hiddenPlaces
+                        places.removeAll { $0.id == place.id }
+                        saveHiddenPlaces(places)
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.caption2)
+                            .fontWeight(.bold)
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(Color(UIColor.secondarySystemGroupedBackground))
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            }
+
+            Button { showingAddHiddenPlace = true } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: "plus.circle.fill")
+                        .font(.subheadline)
+                        .foregroundStyle(.purple)
+                    Text("Add hidden place")
+                        .font(.subheadline)
+                        .foregroundStyle(.purple)
+                    Spacer()
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(Color.purple.opacity(0.06))
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            }
+            .buttonStyle(.plain)
+        }
+        .sheet(isPresented: $showingAddHiddenPlace) {
+            HiddenPlacePicker { place in
+                var places = hiddenPlaces
+                places.append(place)
+                saveHiddenPlaces(places)
+                showingAddHiddenPlace = false
+            }
+            .presentationDetents([.large])
+        }
     }
 
     private func locationSettingRow<T: View>(icon: String, title: String, tint: Color, @ViewBuilder trailing: () -> T) -> some View {
@@ -1327,12 +1446,12 @@ struct SimpleHomePicker: View {
     @State private var searchText = ""
     @State private var selectedCoordinate: CLLocationCoordinate2D?
     @State private var selectedAddress: String?
-    @State private var isSearching = false
+    @State private var suppressNextChange = false
     @FocusState private var isFieldFocused: Bool
     let current: CLLocationCoordinate2D?
-    let onSelect: (CLLocationCoordinate2D) -> Void
+    let onSelect: (CLLocationCoordinate2D, String) -> Void
 
-    init(current: CLLocationCoordinate2D?, onSelect: @escaping (CLLocationCoordinate2D) -> Void) {
+    init(current: CLLocationCoordinate2D?, onSelect: @escaping (CLLocationCoordinate2D, String) -> Void) {
         self.current = current
         self.onSelect = onSelect
     }
@@ -1348,8 +1467,8 @@ struct SimpleHomePicker: View {
                     .font(.headline)
                 Spacer()
                 Button("Save") {
-                    if let coord = selectedCoordinate {
-                        onSelect(coord)
+                    if let coord = selectedCoordinate, let addr = selectedAddress {
+                        onSelect(coord, addr)
                         dismiss()
                     }
                 }
@@ -1468,6 +1587,10 @@ struct SimpleHomePicker: View {
             }
         }
         .onChange(of: searchText) { _, newValue in
+            if suppressNextChange {
+                suppressNextChange = false
+                return
+            }
             selectedCoordinate = nil
             selectedAddress = nil
             searchCompleter.search(newValue)
@@ -1476,15 +1599,17 @@ struct SimpleHomePicker: View {
 
     private func resolveAndSelect(_ suggestion: MKLocalSearchCompletion) {
         isFieldFocused = false
+        searchCompleter.clear()
         let request = MKLocalSearch.Request(completion: suggestion)
         MKLocalSearch(request: request).start { response, _ in
             if let item = response?.mapItems.first,
                let location = item.placemark.location {
                 selectedCoordinate = location.coordinate
-                selectedAddress = [suggestion.title, suggestion.subtitle]
-                    .filter { !$0.isEmpty }
-                    .joined(separator: ", ")
-                searchText = selectedAddress ?? suggestion.title
+                // Short address: just the street portion
+                let shortAddress = suggestion.title
+                selectedAddress = shortAddress
+                suppressNextChange = true
+                searchText = shortAddress
             }
         }
     }
@@ -1501,12 +1626,14 @@ struct ProfileSheetsModifier: ViewModifier {
     let location: LocationManager
     let appleMapsManager: AppleMapsIntegrationManager
     let favoritesManager: InAppFavoritesManager
+    var onHomeSet: ((CLLocationCoordinate2D, String) -> Void)?
 
     func body(content: Content) -> some View {
         content
             .sheet(isPresented: $showingHomePicker) {
-                SimpleHomePicker(current: location.homeLocation) { coord in
+                SimpleHomePicker(current: location.homeLocation) { coord, address in
                     location.setHome(to: coord)
+                    onHomeSet?(coord, address)
                 }
             }
             .sheet(isPresented: $showingLocationImport) {
@@ -1709,6 +1836,186 @@ struct PendingVisitsSheet: View {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") { onDismiss() }
                 }
+            }
+        }
+    }
+}
+
+// MARK: - Hidden Place Model
+
+struct HiddenPlace: Identifiable, Codable {
+    let id: UUID
+    let name: String
+    let address: String
+    let latitude: Double
+    let longitude: Double
+
+    init(name: String, address: String, latitude: Double, longitude: Double) {
+        self.id = UUID()
+        self.name = name
+        self.address = address
+        self.latitude = latitude
+        self.longitude = longitude
+    }
+}
+
+// MARK: - Hidden Place Picker
+
+struct HiddenPlacePicker: View {
+    @Environment(\.dismiss) private var dismiss
+    @StateObject private var searchCompleter = PlaceSearchCompleter()
+    @State private var searchText = ""
+    @State private var placeName = ""
+    @State private var selectedCoordinate: CLLocationCoordinate2D?
+    @State private var selectedAddress: String?
+    @State private var suppressNextChange = false
+    @FocusState private var isNameFocused: Bool
+    @FocusState private var isAddressFocused: Bool
+    let onSave: (HiddenPlace) -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack {
+                Button("Cancel") { dismiss() }
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text("Add Hidden Place")
+                    .font(.headline)
+                Spacer()
+                Button("Save") {
+                    if let coord = selectedCoordinate, let addr = selectedAddress, !placeName.isEmpty {
+                        onSave(HiddenPlace(name: placeName, address: addr, latitude: coord.latitude, longitude: coord.longitude))
+                    }
+                }
+                .fontWeight(.semibold)
+                .disabled(selectedCoordinate == nil || placeName.isEmpty)
+            }
+            .padding()
+
+            Divider()
+
+            VStack(spacing: 12) {
+                // Name field
+                HStack(spacing: 10) {
+                    Image(systemName: "tag.fill")
+                        .font(.system(size: 14))
+                        .foregroundStyle(.secondary)
+                    TextField("Name (e.g. Work, Gym)", text: $placeName)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 16, weight: .medium))
+                        .focused($isNameFocused)
+                }
+                .padding(.horizontal, 18)
+                .padding(.vertical, 12)
+                .background(Color(UIColor.tertiarySystemFill))
+                .clipShape(Capsule())
+
+                // Address search
+                HStack(spacing: 10) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 14))
+                        .foregroundStyle(.secondary)
+                    TextField("Search address...", text: $searchText)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 16, weight: .medium))
+                        .focused($isAddressFocused)
+
+                    if !searchText.isEmpty {
+                        Button {
+                            searchText = ""
+                            selectedCoordinate = nil
+                            selectedAddress = nil
+                            searchCompleter.clear()
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.tertiary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 18)
+                .padding(.vertical, 12)
+                .background(Color(UIColor.tertiarySystemFill))
+                .clipShape(Capsule())
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+
+            // Selected confirmation
+            if let address = selectedAddress {
+                HStack(spacing: 12) {
+                    Image(systemName: "eye.slash.fill")
+                        .font(.title2)
+                        .foregroundStyle(.purple)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(address)
+                            .font(.subheadline)
+                            .fontWeight(.medium)
+                        Text("Your presence will be hidden within 500 ft")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(16)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.purple.opacity(0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .padding(.horizontal, 16)
+                .padding(.top, 12)
+            }
+
+            // Suggestions
+            if !searchCompleter.suggestions.isEmpty && selectedAddress == nil {
+                List {
+                    ForEach(searchCompleter.suggestions, id: \.self) { suggestion in
+                        Button {
+                            resolveAddress(suggestion)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(suggestion.title)
+                                    .font(.subheadline)
+                                    .fontWeight(.medium)
+                                if !suggestion.subtitle.isEmpty {
+                                    Text(suggestion.subtitle)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .listStyle(.plain)
+            } else {
+                Spacer()
+            }
+        }
+        .fontDesign(.rounded)
+        .onAppear {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { isNameFocused = true }
+        }
+        .onChange(of: searchText) { _, newValue in
+            if suppressNextChange {
+                suppressNextChange = false
+                return
+            }
+            selectedCoordinate = nil
+            selectedAddress = nil
+            searchCompleter.search(newValue)
+        }
+    }
+
+    private func resolveAddress(_ suggestion: MKLocalSearchCompletion) {
+        isAddressFocused = false
+        searchCompleter.clear()
+        let request = MKLocalSearch.Request(completion: suggestion)
+        MKLocalSearch(request: request).start { response, _ in
+            if let item = response?.mapItems.first, let loc = item.placemark.location {
+                selectedCoordinate = loc.coordinate
+                selectedAddress = suggestion.title
+                suppressNextChange = true
+                searchText = suggestion.title
             }
         }
     }
