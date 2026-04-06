@@ -4,22 +4,21 @@ import TidepoolShared
 
 struct PlacesController: RouteCollection {
     func boot(routes: RoutesBuilder) throws {
-        // All places routes require authentication (set up in routes.swift)
-        routes.get(":yelpID", use: getDetail)
+        routes.get(":placeID", use: getDetail)
         routes.get("match", use: matchPlace)
     }
 
     // MARK: - Place Detail
 
-    /// GET /v1/places/:yelpID — Enriched place detail from Yelp
+    /// GET /v1/places/:placeID — Enriched place detail from Foursquare
     func getDetail(req: Request) async throws -> Response {
-        guard let yelpID = req.parameters.get("yelpID") else {
-            throw Abort(.badRequest, reason: "Missing yelpID parameter")
+        guard let placeID = req.parameters.get("placeID") else {
+            throw Abort(.badRequest, reason: "Missing placeID parameter")
         }
 
-        let yelp = try getYelpService(req: req)
-        let business = try await yelp.getBusinessDetails(yelpID: yelpID, on: req)
-        let detail = mapToPlaceDetail(business)
+        let fsq = try getService(req: req)
+        let place = try await fsq.getPlaceDetails(fsqID: placeID, on: req)
+        let detail = mapToPlaceDetail(place)
 
         return try await detail.encodeResponse(for: req)
     }
@@ -32,71 +31,71 @@ struct PlacesController: RouteCollection {
         let lng: Double
     }
 
-    /// GET /v1/places/match?name=X&lat=Y&lng=Z — Match a MapKit place to a Yelp ID
+    /// GET /v1/places/match?name=X&lat=Y&lng=Z — Match a place to Foursquare
     func matchPlace(req: Request) async throws -> Response {
         let query = try req.query.decode(PlaceMatchQuery.self)
 
-        let yelp = try getYelpService(req: req)
-        guard let business = try await yelp.matchBusiness(
+        let fsq = try getService(req: req)
+        guard let place = try await fsq.matchPlace(
             name: query.name,
             latitude: query.lat,
             longitude: query.lng,
             on: req
         ) else {
-            throw Abort(.notFound, reason: "No Yelp match found for '\(query.name)'")
+            throw Abort(.notFound, reason: "No match found for '\(query.name)'")
         }
 
-        let detail = mapToPlaceDetail(business)
+        let detail = mapToPlaceDetail(place)
         return try await detail.encodeResponse(for: req)
     }
 
     // MARK: - Helpers
 
-    private func getYelpService(req: Request) throws -> YelpService {
-        guard let apiKey = Environment.get("YELP_API_KEY") else {
-            throw Abort(.internalServerError, reason: "Yelp API key not configured")
+    private func getService(req: Request) throws -> FoursquareService {
+        guard let apiKey = Environment.get("FSQ_API_KEY") else {
+            throw Abort(.internalServerError, reason: "Foursquare API key not configured")
         }
-        return YelpService(apiKey: apiKey)
+        return FoursquareService(apiKey: apiKey)
     }
 
-    private func mapToPlaceDetail(_ business: YelpBusiness) -> PlaceDetail {
-        let hours: [DayHours]? = business.hours?.first?.open.map { period in
-            DayHours(day: period.day, start: period.start, end: period.end)
+    private func mapToPlaceDetail(_ place: FSQPlace) -> PlaceDetail {
+        // Map Foursquare hours (day: 1=Mon..7=Sun) to our format (day: 0=Mon..6=Sun)
+        let hours: [DayHours]? = place.hours?.regular?.map { period in
+            DayHours(day: period.day - 1, start: period.open, end: period.close)
         }
 
-        var photos = business.photos ?? []
-        if photos.isEmpty, let imageUrl = business.imageUrl {
-            photos = [imageUrl]
-        }
+        // Build photo URLs from prefix + suffix
+        let photos: [String] = (place.photos ?? []).compactMap { $0.url }
 
-        let address = business.location.map { loc in
+        let address = place.location.map { loc in
             PlaceAddress(
-                address1: loc.address1,
-                city: loc.city,
-                state: loc.state,
-                zipCode: loc.zipCode
+                address1: loc.address,
+                city: loc.locality,
+                state: loc.region,
+                zipCode: loc.postcode
             )
         }
 
-        let coordinates = business.coordinates.map { coords in
-            Coordinate(latitude: coords.latitude, longitude: coords.longitude)
+        let coordinates = place.geocodes?.main.map { geo in
+            Coordinate(latitude: geo.latitude, longitude: geo.longitude)
         }
 
-        let isOpenNow = business.hours?.first?.isOpenNow
+        // Map Foursquare price (1-4 int) to string ($-$$$$)
+        let priceStr: String? = place.price.map { String(repeating: "$", count: $0) }
 
         return PlaceDetail(
-            yelpID: business.id,
-            name: business.name,
-            categories: business.categories.map(\.title),
-            rating: business.rating,
-            reviewCount: business.reviewCount,
-            price: business.price,
-            phone: business.phone,
+            yelpID: place.fsqId ?? "",  // reusing field name for backward compat
+            name: place.name,
+            categories: (place.categories ?? []).map(\.name),
+            rating: place.rating.map { $0 / 2.0 },  // FSQ uses 0-10, normalize to 0-5
+            reviewCount: nil,
+            price: priceStr,
+            phone: place.tel,
             address: address,
             coordinates: coordinates,
             hours: hours,
             photos: photos.isEmpty ? nil : photos,
-            isOpenNow: isOpenNow
+            isOpenNow: place.hours?.openNow
         )
     }
 }

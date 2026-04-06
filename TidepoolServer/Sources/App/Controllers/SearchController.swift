@@ -14,17 +14,17 @@ struct SearchController: RouteCollection {
         let payload = try req.auth.require(DevicePayload.self)
         let body = try req.content.decode(PlaceSearchRequest.self)
 
-        guard let apiKey = Environment.get("YELP_API_KEY") else {
-            throw Abort(.internalServerError, reason: "Yelp API key not configured")
+        guard let apiKey = Environment.get("FSQ_API_KEY") else {
+            throw Abort(.internalServerError, reason: "Foursquare API key not configured")
         }
 
-        let yelp = YelpService(apiKey: apiKey)
+        let fsq = FoursquareService(apiKey: apiKey)
         let radiusMeters = body.radiusKm.map { Int($0 * 1000) }
 
-        // Fetch Yelp results
-        let yelpResults = try await yelp.searchBusinesses(
+        // Fetch Foursquare results
+        let fsqResults = try await fsq.searchPlaces(
             .init(
-                term: body.query,
+                query: body.query,
                 latitude: body.location.latitude,
                 longitude: body.location.longitude,
                 radiusMeters: radiusMeters,
@@ -38,50 +38,47 @@ struct SearchController: RouteCollection {
         if let provided = body.interestVector {
             viewerVector = provided
         } else {
-            // Try to load from DB
             viewerVector = try await loadVector(deviceID: payload.deviceID, on: req)
         }
 
         // Map and score results
-        let results: [PlaceSearchResult] = yelpResults.businesses.enumerated().map { index, biz in
+        let results: [PlaceSearchResult] = fsqResults.results.enumerated().map { index, place in
+            let categoryNames = (place.categories ?? []).map { $0.name.lowercased() }
             let alignment = viewerVector.map { vec in
-                computeInterestAlignment(categories: biz.categories.map(\.alias), viewerVector: vec)
+                computeInterestAlignment(categories: categoryNames, viewerVector: vec)
             } ?? Float(0)
 
-            let yelpScore = (biz.rating ?? 0) / 5.0
-            let positionDecay = 1.0 - Float(index) / Float(max(yelpResults.businesses.count, 1))
+            let ratingScore = ((place.rating ?? 0) / 10.0) // FSQ uses 0-10
+            let positionDecay = 1.0 - Float(index) / Float(max(fsqResults.results.count, 1))
 
-            // Blended relevance: 0.4 yelp + 0.3 alignment + 0.2 position + 0.1 baseline
-            let relevance = 0.4 * yelpScore + 0.3 * alignment + 0.2 * positionDecay + 0.1
+            let relevance = 0.4 * ratingScore + 0.3 * alignment + 0.2 * positionDecay + 0.1
 
-            let coordinates = biz.coordinates.map { Coordinate(latitude: $0.latitude, longitude: $0.longitude) }
+            let coordinates = place.geocodes?.main.map { Coordinate(latitude: $0.latitude, longitude: $0.longitude) }
                 ?? body.location
 
-            var photos = biz.photos ?? []
-            if photos.isEmpty, let imageUrl = biz.imageUrl {
-                photos = [imageUrl]
-            }
+            let photos: [String] = (place.photos ?? []).compactMap { $0.url }
+            let priceStr: String? = place.price.map { String(repeating: "$", count: $0) }
 
-            let hours: [DayHours]? = biz.hours?.first?.open.map { period in
-                DayHours(day: period.day, start: period.start, end: period.end)
+            let hours: [DayHours]? = place.hours?.regular?.map { period in
+                DayHours(day: period.day - 1, start: period.open, end: period.close)
             }
 
             return PlaceSearchResult(
-                yelpID: biz.id,
-                name: biz.name,
-                category: biz.categories.first?.title ?? "Other",
+                yelpID: place.fsqId ?? "",
+                name: place.name,
+                category: (place.categories ?? []).first?.name ?? "Other",
                 location: coordinates,
-                rating: biz.rating,
-                price: biz.price,
+                rating: place.rating.map { $0 / 2.0 },
+                price: priceStr,
                 photos: photos.isEmpty ? nil : photos,
                 hours: hours,
-                isOpenNow: biz.hours?.first?.isOpenNow,
+                isOpenNow: place.hours?.openNow,
                 relevanceScore: relevance,
                 interestAlignment: alignment
             )
         }.sorted { $0.relevanceScore > $1.relevanceScore }
 
-        let response = PlaceSearchResponse(results: results, total: yelpResults.total)
+        let response = PlaceSearchResponse(results: results, total: fsqResults.results.count)
         return try await response.encodeResponse(for: req)
     }
 
