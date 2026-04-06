@@ -504,38 +504,60 @@ class InterestVectorManager: ObservableObject {
         return topWeighted(from: genreCounts)
     }
 
-    /// Photos: show matched place names vs unmatched (by cluster count)
+    /// Check if a photo cluster has a legit-looking place name
+    static func isLegitPlaceName(_ cluster: PhotoLocationCluster) -> Bool {
+        guard let name = cluster.inferredName, !name.isEmpty, cluster.category != .other else { return false }
+        if name.count <= 2 { return false }
+        if name.first?.isNumber == true { return false } // "3071 N San Fernando Rd"
+        // Filter ALL CAPS names (geocoder artifacts like "K PLACE")
+        let letters = name.filter { $0.isLetter }
+        if !letters.isEmpty && letters == letters.uppercased() { return false }
+        return true
+    }
+
+    /// Filter out clusters near home or hidden places (500ft / 152.4m)
+    private func filterExclusionZones(_ clusters: [PhotoLocationCluster]) -> [PhotoLocationCluster] {
+        let exclusionRadius: Double = 152.4
+        var exclusionPoints: [CLLocation] = []
+
+        // Home
+        if let data = UserDefaults.standard.data(forKey: "home_location"),
+           let coords = try? JSONDecoder().decode([Double].self, from: data), coords.count == 2 {
+            exclusionPoints.append(CLLocation(latitude: coords[0], longitude: coords[1]))
+        }
+
+        // Hidden places
+        if let data = UserDefaults.standard.data(forKey: "hidden_places_data"),
+           let places = try? JSONDecoder().decode([HiddenPlace].self, from: data) {
+            for place in places {
+                exclusionPoints.append(CLLocation(latitude: place.latitude, longitude: place.longitude))
+            }
+        }
+
+        guard !exclusionPoints.isEmpty else { return clusters }
+
+        return clusters.filter { cluster in
+            let clusterLoc = CLLocation(latitude: cluster.centerCoordinate.latitude, longitude: cluster.centerCoordinate.longitude)
+            return !exclusionPoints.contains { $0.distance(from: clusterLoc) < exclusionRadius }
+        }
+    }
+
+    /// Photos: matched places vs unmatched locations
     private func photosRawInsights() -> [TagWeight] {
-        let nonHome = photosManager.clusters.filter { $0.category != .home }
+        let nonHome = filterExclusionZones(photosManager.clusters.filter { $0.category != .home })
         guard !nonHome.isEmpty else { return [] }
 
-        let matched = nonHome.filter { $0.inferredName != nil && !$0.inferredName!.isEmpty && $0.category != .other }
+        let matched = nonHome.filter { Self.isLegitPlaceName($0) }
         let unmatchedCount = nonHome.count - matched.count
         let total = Float(nonHome.count)
 
-        // Top 5 matched places sorted by photo count
-        var results: [TagWeight] = matched
-            .sorted { $0.photoCount > $1.photoCount }
-            .prefix(5)
-            .enumerated()
-            .map { _, cluster in
-                TagWeight(tag: cluster.inferredName!, weight: 1.0 / total)
-            }
-
-        // Distribute matched portion evenly across shown places
-        if !results.isEmpty {
-            let matchedShare = Float(matched.count) / total
-            let perSlice = matchedShare / Float(results.count)
-            results = results.map { TagWeight(tag: $0.tag, weight: perSlice) }
+        var results: [TagWeight] = []
+        if !matched.isEmpty {
+            results.append(TagWeight(tag: "\(matched.count) places found", weight: Float(matched.count) / total))
         }
-
         if unmatchedCount > 0 {
-            results.append(TagWeight(
-                tag: "\(unmatchedCount) unresolved",
-                weight: Float(unmatchedCount) / total
-            ))
+            results.append(TagWeight(tag: "\(unmatchedCount) no match", weight: Float(unmatchedCount) / total))
         }
-
         return results
     }
 

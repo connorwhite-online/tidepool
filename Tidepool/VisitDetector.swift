@@ -151,74 +151,103 @@ final class VisitDetector: NSObject {
     // MARK: - POI Snapping
 
     private func snapToPOI(location: CLLocation, arrivedAt: Date, departedAt: Date, confidence: Float, source: String) {
-        let geocoder = CLGeocoder()
-        geocoder.reverseGeocodeLocation(location) { [weak self] placemarks, _ in
-            guard let self, let placemark = placemarks?.first else { return }
+        // Step 1: POI search — include all categories (no filter = everything)
+        let poiRequest = MKLocalPointsOfInterestRequest(center: location.coordinate, radius: poiSearchRadiusMeters)
+        // No filter — accept any POI type
 
-            let name = placemark.name ?? placemark.thoroughfare ?? "Unknown"
-            let category = self.inferCategory(from: placemark)
+        MKLocalSearch(request: poiRequest).start { [weak self] poiResponse, _ in
+            guard let self else { return }
 
-            // Try MKLocalSearch to find the actual business
-            let request = MKLocalSearch.Request()
-            request.naturalLanguageQuery = name
-            request.region = MKCoordinateRegion(
-                center: location.coordinate,
-                latitudinalMeters: self.poiSearchRadiusMeters * 2,
-                longitudinalMeters: self.poiSearchRadiusMeters * 2
-            )
+            // Pick closest POI within radius
+            let bestPOI = poiResponse?.mapItems
+                .filter { $0.placemark.location?.distance(from: location) ?? .infinity < self.poiSearchRadiusMeters }
+                .sorted { ($0.placemark.location?.distance(from: location) ?? .infinity) < ($1.placemark.location?.distance(from: location) ?? .infinity) }
+                .first
 
-            MKLocalSearch(request: request).start { [weak self] response, _ in
-                guard let self else { return }
+            if let poi = bestPOI, poi.name != nil {
+                let resolvedName = poi.name!
+                let resolvedCategory = PlaceCategory.from(mapItem: poi)
+                let resolvedCoord = poi.placemark.location?.coordinate ?? location.coordinate
+                self.recordVisit(name: resolvedName, category: resolvedCategory, coordinate: resolvedCoord, arrivedAt: arrivedAt, departedAt: departedAt, confidence: confidence, source: source)
+                return
+            }
 
-                let bestMatch = response?.mapItems.first
-                let resolvedName = bestMatch?.name ?? name
-                let resolvedCategory = bestMatch.flatMap { PlaceCategory.from(mapItem: $0) } ?? category
-                let resolvedCoord = bestMatch?.placemark.location?.coordinate ?? location.coordinate
+            // Step 2: Reverse geocode, then do a text search with the name to find nearby business
+            CLGeocoder().reverseGeocodeLocation(location) { placemarks, _ in
+                let placemark = placemarks?.first
+                let geocodedName = placemark?.name ?? placemark?.thoroughfare ?? "Unknown location"
 
-                let calendar = Calendar.current
-                let report = VisitReport(
-                    poiId: bestMatch?.name.flatMap { FavoriteLocation.stablePlaceId(name: $0, coordinate: resolvedCoord) },
-                    yelpId: nil,
-                    name: resolvedName,
-                    category: TidepoolShared.PlaceCategory(rawValue: resolvedCategory.rawValue) ?? .other,
-                    latitude: resolvedCoord.latitude,
-                    longitude: resolvedCoord.longitude,
-                    arrivedAt: self.iso.string(from: arrivedAt),
-                    departedAt: self.iso.string(from: departedAt),
-                    dayOfWeek: calendar.component(.weekday, from: arrivedAt) - 1, // 0=Sun
-                    hourOfDay: calendar.component(.hour, from: arrivedAt),
-                    durationMinutes: Int(departedAt.timeIntervalSince(arrivedAt) / 60),
-                    confidence: confidence,
-                    source: source
-                )
+                // If geocoder returned a business-like name (not just a street number), use it
+                let looksLikeAddress = geocodedName.first?.isNumber == true
+                if !looksLikeAddress {
+                    let category = placemark.map { self.inferCategory(from: $0) } ?? .other
+                    self.recordVisit(name: geocodedName, category: category, coordinate: location.coordinate, arrivedAt: arrivedAt, departedAt: departedAt, confidence: confidence, source: source)
+                    return
+                }
 
-                self.pendingVisits.append(report)
-                self.savePending()
+                // Step 3: Text search with broader query to find the actual business
+                let textRequest = MKLocalSearch.Request()
+                textRequest.naturalLanguageQuery = ""
+                textRequest.region = MKCoordinateRegion(center: location.coordinate, latitudinalMeters: 80, longitudinalMeters: 80)
 
-                // Flush immediately — we may only have a few seconds of background time
-                self.flushToServer()
+                MKLocalSearch(request: textRequest).start { response, _ in
+                    let nearest = response?.mapItems
+                        .filter { $0.name != nil && $0.placemark.location?.distance(from: location) ?? .infinity < 80 }
+                        .sorted { ($0.placemark.location?.distance(from: location) ?? .infinity) < ($1.placemark.location?.distance(from: location) ?? .infinity) }
+                        .first
 
-                // Try Yelp match in background
-                Task {
-                    if let match = try? await BackendClient.shared.matchPlace(
-                        name: resolvedName,
-                        lat: resolvedCoord.latitude,
-                        lng: resolvedCoord.longitude
-                    ) {
-                        // Update the last pending visit with yelp ID
-                        if var last = self.pendingVisits.last, last.name == resolvedName {
-                            self.pendingVisits.removeLast()
-                            let updated = VisitReport(
-                                poiId: last.poiId, yelpId: match.yelpID, name: last.name,
-                                category: last.category, latitude: last.latitude, longitude: last.longitude,
-                                arrivedAt: last.arrivedAt, departedAt: last.departedAt,
-                                dayOfWeek: last.dayOfWeek, hourOfDay: last.hourOfDay,
-                                durationMinutes: last.durationMinutes, confidence: last.confidence, source: last.source
-                            )
-                            self.pendingVisits.append(updated)
-                            self.savePending()
-                        }
+                    if let match = nearest, let matchName = match.name {
+                        let category = PlaceCategory.from(mapItem: match)
+                        let coord = match.placemark.location?.coordinate ?? location.coordinate
+                        self.recordVisit(name: matchName, category: category, coordinate: coord, arrivedAt: arrivedAt, departedAt: departedAt, confidence: confidence, source: source)
+                    } else {
+                        let category = placemark.map { self.inferCategory(from: $0) } ?? .other
+                        self.recordVisit(name: geocodedName, category: category, coordinate: location.coordinate, arrivedAt: arrivedAt, departedAt: departedAt, confidence: confidence, source: source)
                     }
+                }
+            }
+        }
+    }
+
+    private func recordVisit(name: String, category: PlaceCategory, coordinate: CLLocationCoordinate2D, arrivedAt: Date, departedAt: Date, confidence: Float, source: String) {
+        let calendar = Calendar.current
+        let poiId = FavoriteLocation.stablePlaceId(name: name, coordinate: coordinate)
+
+        let report = VisitReport(
+            poiId: poiId,
+            yelpId: nil,
+            name: name,
+            category: TidepoolShared.PlaceCategory(rawValue: category.rawValue) ?? .other,
+            latitude: coordinate.latitude,
+            longitude: coordinate.longitude,
+            arrivedAt: iso.string(from: arrivedAt),
+            departedAt: iso.string(from: departedAt),
+            dayOfWeek: calendar.component(.weekday, from: arrivedAt) - 1,
+            hourOfDay: calendar.component(.hour, from: arrivedAt),
+            durationMinutes: Int(departedAt.timeIntervalSince(arrivedAt) / 60),
+            confidence: confidence,
+            source: source
+        )
+
+        pendingVisits.append(report)
+        savePending()
+        flushToServer()
+
+        // Try Yelp match in background
+        Task {
+            if let match = try? await BackendClient.shared.matchPlace(
+                name: name, lat: coordinate.latitude, lng: coordinate.longitude
+            ) {
+                if let idx = self.pendingVisits.lastIndex(where: { $0.name == name && $0.yelpId == nil }) {
+                    let old = self.pendingVisits[idx]
+                    self.pendingVisits[idx] = VisitReport(
+                        poiId: old.poiId, yelpId: match.yelpID, name: old.name,
+                        category: old.category, latitude: old.latitude, longitude: old.longitude,
+                        arrivedAt: old.arrivedAt, departedAt: old.departedAt,
+                        dayOfWeek: old.dayOfWeek, hourOfDay: old.hourOfDay,
+                        durationMinutes: old.durationMinutes, confidence: old.confidence, source: old.source
+                    )
+                    self.savePending()
                 }
             }
         }
@@ -288,6 +317,13 @@ final class VisitDetector: NSObject {
     /// Manually retry flushing pending visits.
     func retryUpload() {
         flushToServer()
+    }
+
+    /// Remove a specific pending visit by index.
+    func removeVisit(at index: Int) {
+        guard index < pendingVisits.count else { return }
+        pendingVisits.remove(at: index)
+        savePending()
     }
 
     /// Clear all pending visits.

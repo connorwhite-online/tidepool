@@ -31,6 +31,7 @@ struct ProfileView: View {
     @State private var pendingVisitCount: Int = 0
     @State private var showingPendingVisits = false
     @State private var showingAddHiddenPlace = false
+    @State private var showingPhotoPlaces = false
     @AppStorage("home_address") private var homeAddress: String = ""
     @AppStorage("hidden_places_data") private var hiddenPlacesData: Data = Data()
 
@@ -673,8 +674,12 @@ struct ProfileView: View {
                     tags: vectorManager?.getSourceInsights().first(where: { $0.name == "Photos" })?.topTags ?? [],
                     onConnect: { connectPhotos() },
                     onRefresh: { Task { await photosManager.refreshData() } },
-                    onDisconnect: { disconnectPhotos() }
+                    onDisconnect: { disconnectPhotos() },
+                    onDonutTap: { showingPhotoPlaces = true }
                 )
+                .sheet(isPresented: $showingPhotoPlaces) {
+                    PhotoPlacesSheet(photosManager: photosManager)
+                }
             }
             .padding(.horizontal, 16)
             .padding(.bottom, 20)
@@ -715,7 +720,8 @@ struct ProfileView: View {
         summary: String?, tags: [InterestVectorManager.TagWeight],
         onConnect: @escaping () -> Void,
         onRefresh: @escaping () -> Void,
-        onDisconnect: @escaping () -> Void
+        onDisconnect: @escaping () -> Void,
+        onDonutTap: (() -> Void)? = nil
     ) -> some View {
         VStack(spacing: 0) {
             // Header row — always visible, never replaced by Menu label
@@ -795,9 +801,18 @@ struct ProfileView: View {
             if isConnected && !tags.isEmpty && !isSyncing {
                 Divider()
                     .padding(.horizontal, 16)
-                DonutChartView(tags: tags, size: 64, lineWidth: 14)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 12)
+                if let onDonutTap {
+                    Button { onDonutTap() } label: {
+                        DonutChartView(tags: tags, size: 64, lineWidth: 14)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 12)
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    DonutChartView(tags: tags, size: 64, lineWidth: 14)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 12)
+                }
             } else if isConnected && isSyncing {
                 Divider()
                     .padding(.horizontal, 16)
@@ -952,36 +967,56 @@ struct ProfileView: View {
                 .padding(.bottom, 20)
             } else {
                 VStack(spacing: 8) {
-                    // Pending local visits badge — tappable for details
+                    // Pending local visits — chronological, swipe to delete
                     if pendingVisitCount > 0 {
-                        Button { showingPendingVisits = true } label: {
-                            HStack(spacing: 8) {
-                                Image(systemName: "arrow.up.circle.fill")
-                                    .foregroundStyle(.orange)
-                                    .font(.subheadline)
-                                Text("\(pendingVisitCount) pending upload")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                Spacer()
-                                Image(systemName: "chevron.right")
-                                    .font(.caption2)
-                                    .foregroundStyle(.tertiary)
+                        HStack {
+                            Text("Pending")
+                                .font(.caption)
+                                .fontWeight(.semibold)
+                                .foregroundStyle(.orange)
+                            Spacer()
+                            Button { showingPendingVisits = true } label: {
+                                HStack(spacing: 4) {
+                                    Text("Debug")
+                                        .font(.caption2)
+                                    Image(systemName: "chevron.right")
+                                        .font(.caption2)
+                                }
+                                .foregroundStyle(.tertiary)
                             }
+                            .buttonStyle(.plain)
                         }
-                        .buttonStyle(.plain)
                         .padding(.horizontal, 20)
+
+                        ForEach(Array(VisitDetector.shared.pendingVisits.enumerated()), id: \.offset) { i, visit in
+                            pendingVisitRow(visit, index: i)
+                        }
                     }
 
                     // Server-synced visit patterns
-                    ForEach(Array(visitPatterns.prefix(8).enumerated()), id: \.offset) { i, pattern in
-                        visitPatternRow(pattern, index: i)
-                    }
+                    if !visitPatterns.isEmpty {
+                        if pendingVisitCount > 0 {
+                            HStack {
+                                Text("Synced")
+                                    .font(.caption)
+                                    .fontWeight(.semibold)
+                                    .foregroundStyle(.green)
+                                Spacer()
+                            }
+                            .padding(.horizontal, 20)
+                            .padding(.top, 4)
+                        }
 
-                    if visitPatterns.count > 8 {
-                        Text("+ \(visitPatterns.count - 8) more places")
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
-                            .padding(.bottom, 4)
+                        ForEach(Array(visitPatterns.prefix(8).enumerated()), id: \.offset) { i, pattern in
+                            visitPatternRow(pattern, index: i)
+                        }
+
+                        if visitPatterns.count > 8 {
+                            Text("+ \(visitPatterns.count - 8) more places")
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
+                                .padding(.bottom, 4)
+                        }
                     }
                 }
                 .padding(.bottom, 16)
@@ -999,6 +1034,55 @@ struct ProfileView: View {
     }
 
     private let visitColors: [Color] = [.cyan, .blue, .teal, .indigo, .purple, .green, .orange, .mint]
+
+    private func pendingVisitRow(_ visit: VisitReport, index: Int) -> some View {
+        let color = visitColors[index % visitColors.count]
+        let iso = ISO8601DateFormatter()
+        let date = iso.date(from: visit.arrivedAt)
+        let timeStr = date.map { RelativeDateTimeFormatter().localizedString(for: $0, relativeTo: Date()) } ?? visit.arrivedAt
+
+        return HStack(spacing: 12) {
+            Image(systemName: "clock.arrow.circlepath")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 34, height: 34)
+                .background(Color.orange.gradient)
+                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(visit.name)
+                    .font(.subheadline)
+                    .fontWeight(.medium)
+                    .lineLimit(1)
+
+                HStack(spacing: 6) {
+                    Text("\(visit.durationMinutes)m")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(timeStr)
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+
+            Spacer()
+
+            // Delete button
+            Button {
+                VisitDetector.shared.removeVisit(at: index)
+                pendingVisitCount = VisitDetector.shared.pendingVisits.count
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.caption2)
+                    .fontWeight(.bold)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 24, height: 24)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 6)
+    }
 
     private func visitPatternRow(_ pattern: VisitPattern, index: Int) -> some View {
         let color = visitColors[index % visitColors.count]
@@ -1275,17 +1359,29 @@ struct ProfileView: View {
 
             Button { showingAddHiddenPlace = true } label: {
                 HStack(spacing: 12) {
-                    Image(systemName: "plus.circle.fill")
-                        .font(.subheadline)
-                        .foregroundStyle(.purple)
+                    Image(systemName: "eye.slash.fill")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 32, height: 32)
+                        .background(Color.purple.gradient)
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
                     Text("Add hidden place")
                         .font(.subheadline)
-                        .foregroundStyle(.purple)
+
                     Spacer()
+
+                    Image(systemName: "plus")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 28, height: 28)
+                        .background(LinearGradient(colors: [.blue, .cyan], startPoint: .topLeading, endPoint: .bottomTrailing))
+                        .clipShape(Circle())
+                        .shadow(color: .blue.opacity(0.3), radius: 4, y: 2)
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
-                .background(Color.purple.opacity(0.06))
+                .background(Color(UIColor.secondarySystemGroupedBackground))
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             }
             .buttonStyle(.plain)
@@ -1449,10 +1545,12 @@ struct SimpleHomePicker: View {
     @State private var suppressNextChange = false
     @FocusState private var isFieldFocused: Bool
     let current: CLLocationCoordinate2D?
+    let currentAddress: String?
     let onSelect: (CLLocationCoordinate2D, String) -> Void
 
-    init(current: CLLocationCoordinate2D?, onSelect: @escaping (CLLocationCoordinate2D, String) -> Void) {
+    init(current: CLLocationCoordinate2D?, currentAddress: String? = nil, onSelect: @escaping (CLLocationCoordinate2D, String) -> Void) {
         self.current = current
+        self.currentAddress = currentAddress
         self.onSelect = onSelect
     }
 
@@ -1566,9 +1664,11 @@ struct SimpleHomePicker: View {
                         Text("Home is currently set")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
-                        Text(String(format: "%.4f, %.4f", current.latitude, current.longitude))
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
+                        if let addr = currentAddress, !addr.isEmpty {
+                            Text(addr)
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
+                        }
                     } else {
                         Text("Search for your home address")
                             .font(.subheadline)
@@ -1631,7 +1731,7 @@ struct ProfileSheetsModifier: ViewModifier {
     func body(content: Content) -> some View {
         content
             .sheet(isPresented: $showingHomePicker) {
-                SimpleHomePicker(current: location.homeLocation) { coord, address in
+                SimpleHomePicker(current: location.homeLocation, currentAddress: UserDefaults.standard.string(forKey: "home_address")) { coord, address in
                     location.setHome(to: coord)
                     onHomeSet?(coord, address)
                 }
@@ -1838,6 +1938,215 @@ struct PendingVisitsSheet: View {
                 }
             }
         }
+    }
+}
+
+// MARK: - Photo Places Sheet
+
+struct MergedPhotoPlace: Identifiable {
+    let id = UUID()
+    let name: String
+    let category: PlaceCategory
+    var photoCount: Int
+    var firstVisit: Date
+    var lastVisit: Date
+    var clusterCount: Int
+}
+
+struct PhotoPlacesSheet: View {
+    @ObservedObject var photosManager: PhotosIntegrationManager
+    @Environment(\.dismiss) private var dismiss
+
+    private var nonHome: [PhotoLocationCluster] {
+        let filtered = photosManager.clusters.filter { $0.category != .home }
+        let exclusionRadius: Double = 152.4
+        var exclusionPoints: [CLLocation] = []
+
+        if let data = UserDefaults.standard.data(forKey: "home_location"),
+           let coords = try? JSONDecoder().decode([Double].self, from: data), coords.count == 2 {
+            exclusionPoints.append(CLLocation(latitude: coords[0], longitude: coords[1]))
+        }
+        if let data = UserDefaults.standard.data(forKey: "hidden_places_data"),
+           let places = try? JSONDecoder().decode([HiddenPlace].self, from: data) {
+            for place in places {
+                exclusionPoints.append(CLLocation(latitude: place.latitude, longitude: place.longitude))
+            }
+        }
+
+        guard !exclusionPoints.isEmpty else { return filtered }
+        return filtered.filter { cluster in
+            let loc = CLLocation(latitude: cluster.centerCoordinate.latitude, longitude: cluster.centerCoordinate.longitude)
+            return !exclusionPoints.contains { $0.distance(from: loc) < exclusionRadius }
+        }
+    }
+
+    private var matchedRaw: [PhotoLocationCluster] {
+        nonHome.filter { InterestVectorManager.isLegitPlaceName($0) }
+    }
+
+    /// Merged matched places — deduped by name, summing photo counts and widening date ranges
+    private var matched: [MergedPhotoPlace] {
+        var byName: [String: MergedPhotoPlace] = [:]
+        for cluster in matchedRaw {
+            let name = cluster.inferredName ?? ""
+            if var existing = byName[name] {
+                existing.photoCount += cluster.photoCount
+                existing.firstVisit = min(existing.firstVisit, cluster.firstVisit)
+                existing.lastVisit = max(existing.lastVisit, cluster.lastVisit)
+                existing.clusterCount += 1
+                byName[name] = existing
+            } else {
+                byName[name] = MergedPhotoPlace(
+                    name: name,
+                    category: cluster.category,
+                    photoCount: cluster.photoCount,
+                    firstVisit: cluster.firstVisit,
+                    lastVisit: cluster.lastVisit,
+                    clusterCount: 1
+                )
+            }
+        }
+        return byName.values.sorted { $0.photoCount > $1.photoCount }
+    }
+
+    private var unmatchedCount: Int {
+        nonHome.count - matchedRaw.count
+    }
+
+    private var tags: [InterestVectorManager.TagWeight] {
+        let total = Float(nonHome.count)
+        guard total > 0 else { return [] }
+        var results: [InterestVectorManager.TagWeight] = []
+        if !matchedRaw.isEmpty {
+            results.append(.init(tag: "\(matched.count) places found", weight: Float(matchedRaw.count) / total))
+        }
+        if unmatchedCount > 0 {
+            results.append(.init(tag: "\(unmatchedCount) no match", weight: Float(unmatchedCount) / total))
+        }
+        return results
+    }
+
+    var body: some View {
+        NavigationView {
+            ScrollView {
+                VStack(spacing: 20) {
+                    // Donut at top
+                    if !tags.isEmpty {
+                        DonutChartView(tags: tags, size: 80, lineWidth: 18)
+                            .padding(20)
+                            .background(.regularMaterial)
+                            .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                    }
+
+                    // Stats
+                    HStack(spacing: 0) {
+                        statBubble(value: "\(photosManager.metrics?.totalPhotos ?? UserDefaults.standard.integer(forKey: "photos_total_count"))", label: "Photos scanned", color: .orange)
+                        statBubble(value: "\(nonHome.count)", label: "Locations", color: .blue)
+                        statBubble(value: "\(matched.count)", label: "Places found", color: .green)
+                    }
+                    .padding(16)
+                    .background(.regularMaterial)
+                    .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+
+                    // Matched places list
+                    if !matched.isEmpty {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Places Found")
+                                .font(.headline)
+                                .padding(.horizontal, 4)
+
+                            ForEach(matched) { place in
+                                HStack(spacing: 12) {
+                                    Image(systemName: place.category.iconName)
+                                        .font(.system(size: 14, weight: .semibold))
+                                        .foregroundStyle(.white)
+                                        .frame(width: 34, height: 34)
+                                        .background(Color.green.gradient)
+                                        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(place.name)
+                                            .font(.subheadline)
+                                            .fontWeight(.medium)
+                                            .lineLimit(1)
+
+                                        HStack(spacing: 8) {
+                                            Text(place.category.displayName)
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                            Text("\(place.photoCount) photos")
+                                                .font(.caption)
+                                                .foregroundStyle(.tertiary)
+                                        }
+                                    }
+
+                                    Spacer()
+
+                                    VStack(alignment: .trailing, spacing: 2) {
+                                        Text(place.firstVisit, style: .date)
+                                            .font(.caption2)
+                                            .foregroundStyle(.tertiary)
+                                        if place.lastVisit.timeIntervalSince(place.firstVisit) > 86400 {
+                                            Text(place.lastVisit, style: .date)
+                                                .font(.caption2)
+                                                .foregroundStyle(.tertiary)
+                                        }
+                                    }
+                                }
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 10)
+                                .background(Color(UIColor.secondarySystemGroupedBackground))
+                                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            }
+                        }
+                        .padding(16)
+                        .background(.regularMaterial)
+                        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                    }
+
+                    // Unmatched summary
+                    if unmatchedCount > 0 {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Unmatched Locations")
+                                .font(.headline)
+                                .padding(.horizontal, 4)
+
+                            Text("\(unmatchedCount) photo locations couldn't be matched to a known place. These are typically residential areas, streets, or locations without a named business nearby.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 4)
+                        }
+                        .padding(16)
+                        .background(.regularMaterial)
+                        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 8)
+                .padding(.bottom, 32)
+            }
+            .background(Color(UIColor.systemGroupedBackground))
+            .navigationTitle("Photo Places")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+    }
+
+    private func statBubble(value: String, label: String, color: Color) -> some View {
+        VStack(spacing: 4) {
+            Text(value)
+                .font(.headline)
+                .fontWeight(.bold)
+                .foregroundStyle(color)
+            Text(label)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
     }
 }
 
