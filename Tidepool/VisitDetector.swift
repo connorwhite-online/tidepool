@@ -154,41 +154,7 @@ final class VisitDetector: NSObject {
         Task {
             let coord = location.coordinate
 
-            // Strategy 1: Reverse geocode to get a name, then try Foursquare match via server
-            let placemark = await withCheckedContinuation { (cont: CheckedContinuation<CLPlacemark?, Never>) in
-                CLGeocoder().reverseGeocodeLocation(location) { placemarks, _ in
-                    cont.resume(returning: placemarks?.first)
-                }
-            }
-
-            let geocodedName = placemark?.name ?? placemark?.thoroughfare ?? "Unknown location"
-            let looksLikeAddress = geocodedName.first?.isNumber == true
-
-            // Strategy 2: Try Foursquare via backend (best database)
-            if let detail = try? await BackendClient.shared.matchPlace(
-                name: looksLikeAddress ? "restaurant" : geocodedName,
-                lat: coord.latitude,
-                lng: coord.longitude
-            ) {
-                // Verify the Foursquare match is reasonably close
-                if let fsqCoord = detail.coordinates {
-                    let fsqLoc = CLLocation(latitude: fsqCoord.latitude, longitude: fsqCoord.longitude)
-                    let distance = fsqLoc.distance(from: location)
-                    if distance < 150 {
-                        let category = PlaceCategory(rawValue: detail.categories.first?.lowercased() ?? "") ?? .restaurant
-                        self.recordVisit(
-                            name: detail.name,
-                            category: category,
-                            coordinate: CLLocationCoordinate2D(latitude: fsqCoord.latitude, longitude: fsqCoord.longitude),
-                            arrivedAt: arrivedAt, departedAt: departedAt,
-                            confidence: confidence, source: source
-                        )
-                        return
-                    }
-                }
-            }
-
-            // Strategy 3: MapKit POI search as fallback
+            // Strategy 1: MapKit POI search (free, unlimited)
             let poiResult = await withCheckedContinuation { (cont: CheckedContinuation<MKMapItem?, Never>) in
                 let request = MKLocalPointsOfInterestRequest(center: coord, radius: self.poiSearchRadiusMeters)
                 MKLocalSearch(request: request).start { response, _ in
@@ -211,16 +177,44 @@ final class VisitDetector: NSObject {
                 return
             }
 
-            // Strategy 4: Use geocoded name if it's not just an address
+            // Strategy 2: Reverse geocode
+            let placemark = await withCheckedContinuation { (cont: CheckedContinuation<CLPlacemark?, Never>) in
+                CLGeocoder().reverseGeocodeLocation(location) { placemarks, _ in
+                    cont.resume(returning: placemarks?.first)
+                }
+            }
+
+            let geocodedName = placemark?.name ?? placemark?.thoroughfare ?? "Unknown location"
+            let looksLikeAddress = geocodedName.first?.isNumber == true
+
+            // If geocoder found a real name (not address), use it
             if !looksLikeAddress {
                 let category = placemark.map { self.inferCategory(from: $0) } ?? .other
                 self.recordVisit(name: geocodedName, category: category, coordinate: coord,
                                  arrivedAt: arrivedAt, departedAt: departedAt, confidence: confidence, source: source)
-            } else {
-                // Last resort: record with address
-                self.recordVisit(name: geocodedName, category: .other, coordinate: coord,
-                                 arrivedAt: arrivedAt, departedAt: departedAt, confidence: confidence, source: source)
+                return
             }
+
+            // Strategy 3: Foursquare via server (only when MapKit + geocode both failed)
+            if let detail = try? await BackendClient.shared.matchPlace(
+                name: "restaurant bar cafe",
+                lat: coord.latitude, lng: coord.longitude
+            ), let fsqCoord = detail.coordinates {
+                let fsqLoc = CLLocation(latitude: fsqCoord.latitude, longitude: fsqCoord.longitude)
+                if fsqLoc.distance(from: location) < 150 {
+                    let category = PlaceCategory(rawValue: detail.categories.first?.lowercased() ?? "") ?? .restaurant
+                    self.recordVisit(
+                        name: detail.name, category: category,
+                        coordinate: CLLocationCoordinate2D(latitude: fsqCoord.latitude, longitude: fsqCoord.longitude),
+                        arrivedAt: arrivedAt, departedAt: departedAt, confidence: confidence, source: source
+                    )
+                    return
+                }
+            }
+
+            // Last resort: record with address
+            self.recordVisit(name: geocodedName, category: .other, coordinate: coord,
+                             arrivedAt: arrivedAt, departedAt: departedAt, confidence: confidence, source: source)
         }
     }
 
@@ -348,16 +342,33 @@ final class VisitDetector: NSObject {
         lastUploadError = nil
     }
 
-    // MARK: - Persistence
+    // MARK: - Persistence (file-based, survives reinstalls via backup)
+
+    private var visitFileURL: URL {
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        return docs.appendingPathComponent("pending_visits.json")
+    }
 
     private func savePending() {
         guard let data = try? JSONEncoder().encode(pendingVisits) else { return }
-        UserDefaults.standard.set(data, forKey: storeKey)
+        try? data.write(to: visitFileURL, options: .atomic)
+        // Also keep in UserDefaults for the UI to read count quickly
+        UserDefaults.standard.set(pendingVisits.count, forKey: "pending_visit_count")
     }
 
     private func loadPending() {
-        guard let data = UserDefaults.standard.data(forKey: storeKey),
-              let visits = try? JSONDecoder().decode([VisitReport].self, from: data) else { return }
-        pendingVisits = visits
+        // Try file first
+        if let data = try? Data(contentsOf: visitFileURL),
+           let visits = try? JSONDecoder().decode([VisitReport].self, from: data) {
+            pendingVisits = visits
+            return
+        }
+        // Fall back to UserDefaults (migrate old data)
+        if let data = UserDefaults.standard.data(forKey: storeKey),
+           let visits = try? JSONDecoder().decode([VisitReport].self, from: data) {
+            pendingVisits = visits
+            savePending() // migrate to file
+            UserDefaults.standard.removeObject(forKey: storeKey) // clean up old
+        }
     }
 }
