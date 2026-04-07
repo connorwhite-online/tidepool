@@ -47,6 +47,17 @@ struct TidepoolApp: App {
                 .environmentObject(favoritesManager)
                 .fontDesign(.rounded)
                 .environment(\.font, .system(.body, design: .rounded))
+                .task {
+                    // Auto debug-auth on launch if not authenticated
+                    #if DEBUG
+                    if !BackendClient.shared.isAuthenticated {
+                        try? await BackendClient.shared.debugAuthenticate()
+                        if BackendClient.shared.isAuthenticated {
+                            print("[App] Debug authenticated with local server")
+                        }
+                    }
+                    #endif
+                }
                 .onChange(of: scenePhase) { _, newPhase in
                     switch newPhase {
                     case .active:

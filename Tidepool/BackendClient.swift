@@ -38,7 +38,7 @@ class BackendClient: ObservableObject {
     private let keychainManager = KeychainManager.shared
 
     #if DEBUG
-    private let baseURL = "http://localhost:8080"
+    private let baseURL = "http://192.168.86.25:8080"
     #else
     private let baseURL = "https://tidepool-production.up.railway.app"
     #endif

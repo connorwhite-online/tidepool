@@ -151,60 +151,75 @@ final class VisitDetector: NSObject {
     // MARK: - POI Snapping
 
     private func snapToPOI(location: CLLocation, arrivedAt: Date, departedAt: Date, confidence: Float, source: String) {
-        // Step 1: POI search — include all categories (no filter = everything)
-        let poiRequest = MKLocalPointsOfInterestRequest(center: location.coordinate, radius: poiSearchRadiusMeters)
-        // No filter — accept any POI type
+        Task {
+            let coord = location.coordinate
 
-        MKLocalSearch(request: poiRequest).start { [weak self] poiResponse, _ in
-            guard let self else { return }
+            // Strategy 1: Reverse geocode to get a name, then try Foursquare match via server
+            let placemark = await withCheckedContinuation { (cont: CheckedContinuation<CLPlacemark?, Never>) in
+                CLGeocoder().reverseGeocodeLocation(location) { placemarks, _ in
+                    cont.resume(returning: placemarks?.first)
+                }
+            }
 
-            // Pick closest POI within radius
-            let bestPOI = poiResponse?.mapItems
-                .filter { $0.placemark.location?.distance(from: location) ?? .infinity < self.poiSearchRadiusMeters }
-                .sorted { ($0.placemark.location?.distance(from: location) ?? .infinity) < ($1.placemark.location?.distance(from: location) ?? .infinity) }
-                .first
+            let geocodedName = placemark?.name ?? placemark?.thoroughfare ?? "Unknown location"
+            let looksLikeAddress = geocodedName.first?.isNumber == true
 
-            if let poi = bestPOI, poi.name != nil {
-                let resolvedName = poi.name!
-                let resolvedCategory = PlaceCategory.from(mapItem: poi)
-                let resolvedCoord = poi.placemark.location?.coordinate ?? location.coordinate
-                self.recordVisit(name: resolvedName, category: resolvedCategory, coordinate: resolvedCoord, arrivedAt: arrivedAt, departedAt: departedAt, confidence: confidence, source: source)
+            // Strategy 2: Try Foursquare via backend (best database)
+            if let detail = try? await BackendClient.shared.matchPlace(
+                name: looksLikeAddress ? "restaurant" : geocodedName,
+                lat: coord.latitude,
+                lng: coord.longitude
+            ) {
+                // Verify the Foursquare match is reasonably close
+                if let fsqCoord = detail.coordinates {
+                    let fsqLoc = CLLocation(latitude: fsqCoord.latitude, longitude: fsqCoord.longitude)
+                    let distance = fsqLoc.distance(from: location)
+                    if distance < 150 {
+                        let category = PlaceCategory(rawValue: detail.categories.first?.lowercased() ?? "") ?? .restaurant
+                        self.recordVisit(
+                            name: detail.name,
+                            category: category,
+                            coordinate: CLLocationCoordinate2D(latitude: fsqCoord.latitude, longitude: fsqCoord.longitude),
+                            arrivedAt: arrivedAt, departedAt: departedAt,
+                            confidence: confidence, source: source
+                        )
+                        return
+                    }
+                }
+            }
+
+            // Strategy 3: MapKit POI search as fallback
+            let poiResult = await withCheckedContinuation { (cont: CheckedContinuation<MKMapItem?, Never>) in
+                let request = MKLocalPointsOfInterestRequest(center: coord, radius: self.poiSearchRadiusMeters)
+                MKLocalSearch(request: request).start { response, _ in
+                    let best = response?.mapItems
+                        .filter { $0.placemark.location?.distance(from: location) ?? .infinity < self.poiSearchRadiusMeters }
+                        .sorted { ($0.placemark.location?.distance(from: location) ?? .infinity) < ($1.placemark.location?.distance(from: location) ?? .infinity) }
+                        .first
+                    cont.resume(returning: best)
+                }
+            }
+
+            if let poi = poiResult, let name = poi.name {
+                self.recordVisit(
+                    name: name,
+                    category: PlaceCategory.from(mapItem: poi),
+                    coordinate: poi.placemark.location?.coordinate ?? coord,
+                    arrivedAt: arrivedAt, departedAt: departedAt,
+                    confidence: confidence, source: source
+                )
                 return
             }
 
-            // Step 2: Reverse geocode, then do a text search with the name to find nearby business
-            CLGeocoder().reverseGeocodeLocation(location) { placemarks, _ in
-                let placemark = placemarks?.first
-                let geocodedName = placemark?.name ?? placemark?.thoroughfare ?? "Unknown location"
-
-                // If geocoder returned a business-like name (not just a street number), use it
-                let looksLikeAddress = geocodedName.first?.isNumber == true
-                if !looksLikeAddress {
-                    let category = placemark.map { self.inferCategory(from: $0) } ?? .other
-                    self.recordVisit(name: geocodedName, category: category, coordinate: location.coordinate, arrivedAt: arrivedAt, departedAt: departedAt, confidence: confidence, source: source)
-                    return
-                }
-
-                // Step 3: Text search with broader query to find the actual business
-                let textRequest = MKLocalSearch.Request()
-                textRequest.naturalLanguageQuery = ""
-                textRequest.region = MKCoordinateRegion(center: location.coordinate, latitudinalMeters: 80, longitudinalMeters: 80)
-
-                MKLocalSearch(request: textRequest).start { response, _ in
-                    let nearest = response?.mapItems
-                        .filter { $0.name != nil && $0.placemark.location?.distance(from: location) ?? .infinity < 80 }
-                        .sorted { ($0.placemark.location?.distance(from: location) ?? .infinity) < ($1.placemark.location?.distance(from: location) ?? .infinity) }
-                        .first
-
-                    if let match = nearest, let matchName = match.name {
-                        let category = PlaceCategory.from(mapItem: match)
-                        let coord = match.placemark.location?.coordinate ?? location.coordinate
-                        self.recordVisit(name: matchName, category: category, coordinate: coord, arrivedAt: arrivedAt, departedAt: departedAt, confidence: confidence, source: source)
-                    } else {
-                        let category = placemark.map { self.inferCategory(from: $0) } ?? .other
-                        self.recordVisit(name: geocodedName, category: category, coordinate: location.coordinate, arrivedAt: arrivedAt, departedAt: departedAt, confidence: confidence, source: source)
-                    }
-                }
+            // Strategy 4: Use geocoded name if it's not just an address
+            if !looksLikeAddress {
+                let category = placemark.map { self.inferCategory(from: $0) } ?? .other
+                self.recordVisit(name: geocodedName, category: category, coordinate: coord,
+                                 arrivedAt: arrivedAt, departedAt: departedAt, confidence: confidence, source: source)
+            } else {
+                // Last resort: record with address
+                self.recordVisit(name: geocodedName, category: .other, coordinate: coord,
+                                 arrivedAt: arrivedAt, departedAt: departedAt, confidence: confidence, source: source)
             }
         }
     }
