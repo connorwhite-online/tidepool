@@ -27,6 +27,7 @@ struct ProfileView: View {
     @State private var showingBirthdayPicker = false
     @State private var tempBirthday: Date = Calendar.current.date(byAdding: .year, value: -25, to: Date()) ?? Date()
     @State private var visitPatterns: [VisitPattern] = []
+    @State private var recentVisits: [VisitReport] = []
     @State private var isLoadingVisits = false
     @State private var pendingVisitCount: Int = 0
     @State private var showingPendingVisits = false
@@ -124,20 +125,19 @@ struct ProfileView: View {
     }
 
     private func loadVisitData() {
-        // Show pending local count
-        let pending = UserDefaults.standard.data(forKey: "pending_visits")
-            .flatMap { try? JSONDecoder().decode([VisitReport].self, from: $0) }
-        pendingVisitCount = pending?.count ?? 0
+        pendingVisitCount = VisitDetector.shared.pendingVisits.count
 
-        // Fetch server patterns
         guard BackendClient.shared.isAuthenticated else { return }
         isLoadingVisits = true
         Task {
             do {
-                let response = try await BackendClient.shared.getVisitPatterns()
-                visitPatterns = response.patterns
+                async let patternsTask = BackendClient.shared.getVisitPatterns()
+                async let recentTask = BackendClient.shared.getRecentVisits(limit: 50)
+                let (patternsResult, recentResult) = try await (patternsTask, recentTask)
+                visitPatterns = patternsResult.patterns
+                recentVisits = recentResult
             } catch {
-                print("[ProfileView] visit patterns fetch failed: \(error.localizedDescription)")
+                print("[ProfileView] visit data fetch failed: \(error.localizedDescription)")
             }
             isLoadingVisits = false
         }
@@ -951,7 +951,7 @@ struct ProfileView: View {
                         .foregroundStyle(.secondary)
                 }
                 .padding(.bottom, 20)
-            } else if visitPatterns.isEmpty && pendingVisitCount == 0 {
+            } else if recentVisits.isEmpty && pendingVisitCount == 0 {
                 VStack(spacing: 6) {
                     Image(systemName: "mappin.and.ellipse")
                         .font(.title2)
@@ -994,11 +994,11 @@ struct ProfileView: View {
                         }
                     }
 
-                    // Server-synced visit patterns
-                    if !visitPatterns.isEmpty {
+                    // Uploaded visits (chronological)
+                    if !recentVisits.isEmpty {
                         if pendingVisitCount > 0 {
                             HStack {
-                                Text("Synced")
+                                Text("History")
                                     .font(.caption)
                                     .fontWeight(.semibold)
                                     .foregroundStyle(.green)
@@ -1008,12 +1008,12 @@ struct ProfileView: View {
                             .padding(.top, 4)
                         }
 
-                        ForEach(Array(visitPatterns.prefix(8).enumerated()), id: \.offset) { i, pattern in
-                            visitPatternRow(pattern, index: i)
+                        ForEach(Array(recentVisits.prefix(20).enumerated()), id: \.offset) { i, visit in
+                            uploadedVisitRow(visit, index: i)
                         }
 
-                        if visitPatterns.count > 8 {
-                            Text("+ \(visitPatterns.count - 8) more places")
+                        if recentVisits.count > 20 {
+                            Text("+ \(recentVisits.count - 20) more")
                                 .font(.caption)
                                 .foregroundStyle(.tertiary)
                                 .padding(.bottom, 4)
@@ -1091,6 +1091,61 @@ struct ProfileView: View {
         .buttonStyle(.plain)
         .padding(.horizontal, 20)
         .padding(.vertical, 6)
+    }
+
+    @State private var selectedUploadedVisit: VisitReport? = nil
+
+    private func uploadedVisitRow(_ visit: VisitReport, index: Int) -> some View {
+        let color = visitColors[index % visitColors.count]
+        let iso = ISO8601DateFormatter()
+        let date = iso.date(from: visit.arrivedAt)
+        let timeStr = date.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? visit.arrivedAt
+        let categoryIcon = (PlaceCategory(rawValue: visit.category.rawValue) ?? .other).iconName
+
+        return Button {
+            selectedUploadedVisit = visit
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: categoryIcon)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 34, height: 34)
+                    .background(color.gradient)
+                    .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(visit.name)
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+
+                    HStack(spacing: 6) {
+                        Text("\(visit.durationMinutes)m")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text(timeStr)
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+
+                Spacer()
+
+                Image(systemName: "chevron.right")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 6)
+        .sheet(isPresented: Binding(
+            get: { selectedUploadedVisit?.arrivedAt == visit.arrivedAt },
+            set: { if !$0 { selectedUploadedVisit = nil } }
+        )) {
+            UploadedVisitDetailSheet(visit: visit)
+        }
     }
 
     private func visitPatternRow(_ pattern: VisitPattern, index: Int) -> some View {
@@ -2156,6 +2211,82 @@ struct PhotoPlacesSheet: View {
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity)
+    }
+}
+
+// MARK: - Uploaded Visit Detail Sheet
+
+struct UploadedVisitDetailSheet: View {
+    let visit: VisitReport
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationView {
+            ScrollView {
+                VStack(spacing: 16) {
+                    // Mini map
+                    Map(initialPosition: .region(MKCoordinateRegion(
+                        center: CLLocationCoordinate2D(latitude: visit.latitude, longitude: visit.longitude),
+                        span: MKCoordinateSpan(latitudeDelta: 0.003, longitudeDelta: 0.003)
+                    ))) {
+                        Marker(visit.name, coordinate: CLLocationCoordinate2D(latitude: visit.latitude, longitude: visit.longitude))
+                            .tint(.green)
+                    }
+                    .frame(height: 200)
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+
+                    // Info card
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Text(visit.name)
+                                .font(.title3)
+                                .fontWeight(.bold)
+                            Spacer()
+                            Text("Synced")
+                                .font(.caption2)
+                                .fontWeight(.semibold)
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
+                                .background(Color.green)
+                                .clipShape(Capsule())
+                        }
+
+                        HStack(spacing: 16) {
+                            Label(visit.category.rawValue, systemImage: "tag")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                            Label("\(visit.durationMinutes) min", systemImage: "clock")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        let iso = ISO8601DateFormatter()
+                        if let date = iso.date(from: visit.arrivedAt) {
+                            Label(date.formatted(date: .abbreviated, time: .shortened), systemImage: "calendar")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Label(String(format: "%.5f, %.5f", visit.latitude, visit.longitude), systemImage: "location")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
+                    .padding(16)
+                    .background(.regularMaterial)
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                }
+                .padding(16)
+            }
+            .background(Color(UIColor.systemGroupedBackground))
+            .navigationTitle("Check-in Detail")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
     }
 }
 

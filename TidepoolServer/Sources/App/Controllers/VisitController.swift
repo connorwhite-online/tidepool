@@ -7,6 +7,8 @@ struct VisitController: RouteCollection {
     func boot(routes: RoutesBuilder) throws {
         routes.post("batch", use: batchUpload)
         routes.get("patterns", use: patterns)
+        routes.get("recent", use: recent)
+        routes.delete(":visitID", use: deleteVisit)
     }
 
     /// Accept a batch of visit reports, deduplicate via SQL, and bulk insert.
@@ -135,6 +137,53 @@ struct VisitController: RouteCollection {
         let typical_hours: [Int]
         let last_visit: Date
     }
+
+    // MARK: - Recent Visits (chronological)
+
+    /// GET /v1/visits/recent?limit=50 — Individual visits, newest first.
+    func recent(req: Request) async throws -> [VisitReport] {
+        let payload = try req.auth.require(DevicePayload.self)
+        let limit = (try? req.query.get(Int.self, at: "limit")) ?? 50
+
+        let visits = try await Visit.query(on: req.db)
+            .filter(\.$device.$id == payload.deviceID)
+            .sort(\.$arrivedAt, .descending)
+            .limit(min(limit, 200))
+            .all()
+
+        let iso = ISO8601DateFormatter()
+        return visits.map { v in
+            VisitReport(
+                poiId: v.poiID, yelpId: v.yelpID, name: v.name,
+                category: PlaceCategory(rawValue: v.category) ?? .other,
+                latitude: v.latitude, longitude: v.longitude,
+                arrivedAt: iso.string(from: v.arrivedAt),
+                departedAt: iso.string(from: v.departedAt),
+                dayOfWeek: v.dayOfWeek, hourOfDay: v.hourOfDay,
+                durationMinutes: v.durationMinutes,
+                confidence: v.confidence, source: v.source
+            )
+        }
+    }
+
+    // MARK: - Delete Visit
+
+    /// DELETE /v1/visits/:visitID
+    func deleteVisit(req: Request) async throws -> HTTPStatus {
+        let payload = try req.auth.require(DevicePayload.self)
+        guard let idStr = req.parameters.get("visitID"),
+              let id = UUID(uuidString: idStr) else {
+            throw Abort(.badRequest, reason: "Invalid visit ID")
+        }
+        guard let visit = try await Visit.find(id, on: req.db) else {
+            throw Abort(.notFound)
+        }
+        guard visit.$device.id == payload.deviceID else {
+            throw Abort(.forbidden)
+        }
+        try await visit.delete(on: req.db)
+        return .noContent
+    }
 }
 
 // MARK: - Vapor Content conformance
@@ -142,3 +191,4 @@ struct VisitController: RouteCollection {
 extension VisitBatchRequest: @retroactive Content {}
 extension VisitBatchResponse: @retroactive Content {}
 extension VisitPatternResponse: @retroactive Content {}
+extension VisitReport: @retroactive Content {}

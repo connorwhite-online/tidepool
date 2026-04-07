@@ -147,6 +147,10 @@ class BackendClient: ObservableObject {
         try await request(method: "GET", path: "/v1/visits/patterns")
     }
 
+    func getRecentVisits(limit: Int = 50) async throws -> [VisitReport] {
+        try await request(method: "GET", path: "/v1/visits/recent?limit=\(limit)")
+    }
+
     // MARK: - Aligned Heat & Recommendations
 
     func fetchAlignedHeat(_ body: AlignedHeatRequest) async throws -> HeatTileResponse {
