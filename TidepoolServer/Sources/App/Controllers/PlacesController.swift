@@ -52,10 +52,11 @@ struct PlacesController: RouteCollection {
     // MARK: - Helpers
 
     private func getService(req: Request) throws -> FoursquareService {
-        guard let apiKey = Environment.get("FSQ_API_KEY") else {
-            throw Abort(.internalServerError, reason: "Foursquare API key not configured")
+        guard let clientID = Environment.get("FSQ_CLIENT_ID"),
+              let clientSecret = Environment.get("FSQ_CLIENT_SECRET") else {
+            throw Abort(.internalServerError, reason: "Foursquare credentials not configured")
         }
-        return FoursquareService(apiKey: apiKey)
+        return FoursquareService(clientID: clientID, clientSecret: clientSecret)
     }
 
     private func mapToPlaceDetail(_ place: FSQPlace) -> PlaceDetail {

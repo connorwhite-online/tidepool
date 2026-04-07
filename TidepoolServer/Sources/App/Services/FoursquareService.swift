@@ -2,14 +2,25 @@ import Vapor
 import Redis
 import TidepoolShared
 
-/// Server-side Foursquare Places API v3 client with Redis caching.
-/// Replaces YelpService — same interface, different backend.
+/// Server-side Foursquare Places API v2 client with Redis caching.
+/// Uses Client ID + Secret auth (v2) since v3 Service API keys have provisioning issues.
 struct FoursquareService {
-    private let apiKey: String
-    private let baseURL = "https://api.foursquare.com/v3"
+    private let clientID: String
+    private let clientSecret: String
+    private let baseURL = "https://api.foursquare.com/v2"
+    private let apiVersion = "20240101"
 
-    init(apiKey: String) {
-        self.apiKey = apiKey
+    init(clientID: String, clientSecret: String) {
+        self.clientID = clientID
+        self.clientSecret = clientSecret
+    }
+
+    private func authParams() -> [URLQueryItem] {
+        [
+            URLQueryItem(name: "client_id", value: clientID),
+            URLQueryItem(name: "client_secret", value: clientSecret),
+            URLQueryItem(name: "v", value: apiVersion),
+        ]
     }
 
     // MARK: - Place Search
@@ -25,23 +36,23 @@ struct FoursquareService {
     func searchPlaces(_ params: SearchParams, on req: Request) async throws -> FSQSearchResponse {
         let cacheKey = "fsq:search:\(params.query.lowercased()):\(String(format: "%.3f", params.latitude)):\(String(format: "%.3f", params.longitude)):\(params.radiusMeters ?? 0)"
         if let cached = try? await req.redis.get(RedisKey(cacheKey), asJSON: FSQSearchResponse.self) {
-            req.logger.info("[Foursquare] Cache hit for search: \(params.query)")
             return cached
         }
 
-        var urlComponents = URLComponents(string: baseURL + "/places/search")!
-        urlComponents.queryItems = [
+        var urlComponents = URLComponents(string: baseURL + "/venues/search")!
+        urlComponents.queryItems = authParams() + [
             URLQueryItem(name: "query", value: params.query),
             URLQueryItem(name: "ll", value: "\(params.latitude),\(params.longitude)"),
             URLQueryItem(name: "limit", value: String(params.limit)),
-            URLQueryItem(name: "fields", value: "fsq_id,name,categories,geocodes,location,rating,price,hours,photos,tel,website"),
         ]
         if let radius = params.radiusMeters {
             urlComponents.queryItems?.append(URLQueryItem(name: "radius", value: String(min(radius, 100000))))
         }
 
         let data = try await makeRequest(url: urlComponents.url!, on: req)
-        let decoded = try JSONDecoder().decode(FSQSearchResponse.self, from: data)
+        let wrapper = try JSONDecoder().decode(FSQv2Response<FSQv2VenueList>.self, from: data)
+        let results = wrapper.response.venues.map { $0.toFSQPlace() }
+        let decoded = FSQSearchResponse(results: results)
 
         try? await req.redis.set(RedisKey(cacheKey), toJSON: decoded)
         _ = try? await req.redis.expire(RedisKey(cacheKey), after: .seconds(3600))
@@ -54,13 +65,15 @@ struct FoursquareService {
     func getPlaceDetails(fsqID: String, on req: Request) async throws -> FSQPlace {
         let cacheKey = "fsq:place:\(fsqID)"
         if let cached = try? await req.redis.get(RedisKey(cacheKey), asJSON: FSQPlace.self) {
-            req.logger.info("[Foursquare] Cache hit for place: \(fsqID)")
             return cached
         }
 
-        let url = URL(string: "\(baseURL)/places/\(fsqID)?fields=fsq_id,name,categories,geocodes,location,rating,price,hours,photos,tel,website")!
-        let data = try await makeRequest(url: url, on: req)
-        let decoded = try JSONDecoder().decode(FSQPlace.self, from: data)
+        var urlComponents = URLComponents(string: baseURL + "/venues/\(fsqID)")!
+        urlComponents.queryItems = authParams()
+
+        let data = try await makeRequest(url: urlComponents.url!, on: req)
+        let wrapper = try JSONDecoder().decode(FSQv2Response<FSQv2VenueWrapper>.self, from: data)
+        let decoded = wrapper.response.venue.toFSQPlace()
 
         try? await req.redis.set(RedisKey(cacheKey), toJSON: decoded)
         _ = try? await req.redis.expire(RedisKey(cacheKey), after: .seconds(86400))
@@ -76,25 +89,9 @@ struct FoursquareService {
             return cached
         }
 
-        // Try the match endpoint first
-        var matchComponents = URLComponents(string: baseURL + "/places/match")!
-        matchComponents.queryItems = [
-            URLQueryItem(name: "name", value: name),
-            URLQueryItem(name: "ll", value: "\(latitude),\(longitude)"),
-            URLQueryItem(name: "fields", value: "fsq_id,name,categories,geocodes,location,rating,price,hours,photos,tel,website"),
-        ]
-
-        if let data = try? await makeRequest(url: matchComponents.url!, on: req) {
-            if let place = try? JSONDecoder().decode(FSQPlace.self, from: data), place.fsqId != nil {
-                try? await req.redis.set(RedisKey(cacheKey), toJSON: place)
-                _ = try? await req.redis.expire(RedisKey(cacheKey), after: .seconds(86400))
-                return place
-            }
-        }
-
-        // Fallback: search with name + tight radius
+        // Search with intent=match for best name match
         let searchResult = try await searchPlaces(
-            SearchParams(query: name, latitude: latitude, longitude: longitude, radiusMeters: 200, limit: 3),
+            SearchParams(query: name, latitude: latitude, longitude: longitude, radiusMeters: 1000, limit: 5),
             on: req
         )
 
@@ -115,7 +112,6 @@ struct FoursquareService {
 
     private func makeRequest(url: URL, on req: Request) async throws -> Data {
         var urlRequest = URLRequest(url: url)
-        urlRequest.setValue(apiKey, forHTTPHeaderField: "Authorization")
         urlRequest.setValue("application/json", forHTTPHeaderField: "Accept")
 
         let (data, response) = try await URLSession.shared.data(for: urlRequest)
@@ -134,6 +130,107 @@ struct FoursquareService {
 
         return data
     }
+}
+
+// MARK: - v2 Response Wrappers
+
+struct FSQv2Response<T: Codable>: Codable {
+    let response: T
+}
+
+struct FSQv2VenueList: Codable {
+    let venues: [FSQv2Venue]
+}
+
+struct FSQv2VenueWrapper: Codable {
+    let venue: FSQv2Venue
+}
+
+struct FSQv2Venue: Codable {
+    let id: String
+    let name: String
+    let categories: [FSQv2Category]?
+    let location: FSQv2Location?
+    let rating: Float?
+    let price: FSQv2Price?
+    let hours: FSQv2Hours?
+    let contact: FSQv2Contact?
+    let url: String?
+    let bestPhoto: FSQv2Photo?
+
+    func toFSQPlace() -> FSQPlace {
+        let coords = location.map { FSQGeocodes(main: FSQLatLng(latitude: $0.lat, longitude: $0.lng)) }
+        let fsqLocation = location.map { loc in
+            FSQLocation(address: loc.address, locality: loc.city, region: loc.state, postcode: loc.postalCode, country: loc.country, formattedAddress: loc.formattedAddress?.joined(separator: ", "))
+        }
+        let fsqHours = hours.map { h in
+            FSQHours(regular: h.timeframes?.flatMap { tf in
+                tf.open?.map { slot in
+                    FSQHourPeriod(day: tf.days.hashValue, open: slot.start ?? "0000", close: slot.end ?? "2359")
+                } ?? []
+            }, openNow: hours?.isOpen)
+        }
+        let photos: [FSQPhoto]? = bestPhoto.map { [FSQPhoto(id: nil, prefix: $0.prefix, suffix: $0.suffix, width: $0.width, height: $0.height)] }
+
+        return FSQPlace(
+            fsqId: id, name: name,
+            categories: categories?.map { FSQCategory(id: String($0.id), name: $0.name, shortName: $0.shortName, icon: nil) },
+            geocodes: coords, location: fsqLocation,
+            rating: rating, price: price?.tier,
+            hours: fsqHours, photos: photos,
+            tel: contact?.phone, website: url
+        )
+    }
+}
+
+struct FSQv2Category: Codable {
+    let id: String
+    let name: String
+    let shortName: String?
+}
+
+struct FSQv2Location: Codable {
+    let address: String?
+    let lat: Double
+    let lng: Double
+    let city: String?
+    let state: String?
+    let postalCode: String?
+    let country: String?
+    let formattedAddress: [String]?
+}
+
+struct FSQv2Price: Codable {
+    let tier: Int?
+    let message: String?
+}
+
+struct FSQv2Hours: Codable {
+    let isOpen: Bool?
+    let timeframes: [FSQv2Timeframe]?
+}
+
+struct FSQv2Timeframe: Codable {
+    let days: String?
+    let open: [FSQv2TimeSlot]?
+}
+
+struct FSQv2TimeSlot: Codable {
+    let start: String?
+    let end: String?
+    let renderedTime: String?
+}
+
+struct FSQv2Contact: Codable {
+    let phone: String?
+    let formattedPhone: String?
+}
+
+struct FSQv2Photo: Codable {
+    let prefix: String?
+    let suffix: String?
+    let width: Int?
+    let height: Int?
 }
 
 // MARK: - Foursquare Response Types
@@ -162,7 +259,7 @@ struct FSQPlace: Codable {
 }
 
 struct FSQCategory: Codable {
-    let id: Int
+    let id: String
     let name: String
     let shortName: String?
     let icon: FSQIcon?

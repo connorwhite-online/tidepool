@@ -14,11 +14,12 @@ struct SearchController: RouteCollection {
         let payload = try req.auth.require(DevicePayload.self)
         let body = try req.content.decode(PlaceSearchRequest.self)
 
-        guard let apiKey = Environment.get("FSQ_API_KEY") else {
-            throw Abort(.internalServerError, reason: "Foursquare API key not configured")
+        guard let clientID = Environment.get("FSQ_CLIENT_ID"),
+              let clientSecret = Environment.get("FSQ_CLIENT_SECRET") else {
+            throw Abort(.internalServerError, reason: "Foursquare credentials not configured")
         }
 
-        let fsq = FoursquareService(apiKey: apiKey)
+        let fsq = FoursquareService(clientID: clientID, clientSecret: clientSecret)
         let radiusMeters = body.radiusKm.map { Int($0 * 1000) }
 
         // Fetch Foursquare results
