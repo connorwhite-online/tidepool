@@ -47,6 +47,7 @@ struct ProfileController: RouteCollection {
                 quality = \(bind: body.quality),
                 active_sources = '\(unsafeRaw: sourcesStr)'::text[],
                 vector_version = device_profiles.vector_version + 1,
+                tidepool_computed_at = NULL,
                 updated_at = now()
             """)).run()
 
@@ -147,6 +148,7 @@ struct ProfileController: RouteCollection {
                 quality = \(bind: body.quality),
                 active_sources = '\(unsafeRaw: sourcesStr)'::text[],
                 vector_version = device_profiles.vector_version + 1,
+                tidepool_computed_at = NULL,
                 updated_at = now()
             """)).run()
 

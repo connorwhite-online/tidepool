@@ -24,62 +24,64 @@ struct AlignedHeatController: RouteCollection {
         let deviceIDStr = payload.deviceID.uuidString
 
         // Get similar users (cached in Redis or computed)
-        let similarDeviceIDs = try await getSimilarUsers(deviceID: deviceIDStr, sql: sql, req: req)
+        let similarUsers = try await getSimilarUsers(deviceID: deviceIDStr, sql: sql, req: req)
 
-        guard !similarDeviceIDs.isEmpty else {
+        guard !similarUsers.isEmpty else {
             let meta = HeatTileMeta(kMin: kMin, epsilon: epsilon, ttlSeconds: 900)
             return HeatTileResponse(tiles: [], meta: meta)
         }
 
-        // Query visits for similar users filtered by time
-        let deviceList = similarDeviceIDs.map { "'\($0)'::uuid" }.joined(separator: ",")
-        let hourLow = (body.currentHour - 2 + 24) % 24
-        let hourHigh = (body.currentHour + 2) % 24
+        // Build similarity lookup
+        let simLookup = Dictionary(uniqueKeysWithValues: similarUsers.map { ($0.id, $0.similarity) })
+        let deviceList = similarUsers.map { "'\($0.id)'::uuid" }.joined(separator: ",")
 
-        let hourFilter: String
-        if hourLow < hourHigh {
-            hourFilter = "hour_of_day BETWEEN \(hourLow) AND \(hourHigh)"
-        } else {
-            hourFilter = "(hour_of_day >= \(hourLow) OR hour_of_day <= \(hourHigh))"
-        }
-
+        // Query visits with individual device_id for similarity weighting
         let visitRows = try await sql.raw(SQLQueryString("""
-            SELECT latitude, longitude, COUNT(DISTINCT device_id) as contributor_count
+            SELECT device_id::text as device_id, latitude, longitude, hour_of_day,
+                   COUNT(*) as visit_count
             FROM visits
             WHERE device_id IN (\(unsafeRaw: deviceList))
               AND (day_of_week = \(unsafeRaw: String(body.currentDayOfWeek))
                    OR day_of_week = \(unsafeRaw: String((body.currentDayOfWeek + 6) % 7))
                    OR day_of_week = \(unsafeRaw: String((body.currentDayOfWeek + 1) % 7)))
-              AND \(unsafeRaw: hourFilter)
-            GROUP BY latitude, longitude
-            """)).all(decoding: VisitHeatRow.self)
+            GROUP BY device_id, latitude, longitude, hour_of_day
+            """)).all(decoding: WeightedVisitRow.self)
 
-        // Snap to tiles and aggregate
-        var tileCounts: [String: Int] = [:]
+        // Snap to tiles and compute weighted intensity
+        var tileScores: [String: Float] = [:]
+        var tileContributors: [String: Set<String>] = [:]
+
         for row in visitRows {
             let coord = Coordinate(latitude: row.latitude, longitude: row.longitude)
-            let tileID = GridTiler.tileID(for: coord)
-            tileCounts[tileID.description, default: 0] += row.contributor_count
+            let tileID = GridTiler.tileID(for: coord).description
+
+            let similarity = simLookup[row.device_id] ?? 0.1
+            let frequency = min(Float(row.visit_count) / 20.0, 1.0)
+            let timeRelevance = gaussianTimeRelevance(visitHour: row.hour_of_day, currentHour: body.currentHour)
+
+            let score = similarity * frequency * timeRelevance
+            tileScores[tileID, default: 0] += score
+            tileContributors[tileID, default: []].insert(row.device_id)
         }
 
-        // Filter by viewport
+        // Filter by viewport and k-anonymity
         let viewportTiles = Set(
             GridTiler.tilesInBounds(sw: body.viewport.sw, ne: body.viewport.ne)
                 .map { $0.description }
         )
 
         var heatTiles: [HeatTile] = []
-        for (tileStr, count) in tileCounts where viewportTiles.contains(tileStr) {
-            guard count >= kMin else { continue }
+        for (tileStr, score) in tileScores where viewportTiles.contains(tileStr) {
+            let contributorCount = tileContributors[tileStr]?.count ?? 0
+            guard contributorCount >= kMin else { continue }
 
-            let noisyCount = Float(count) + laplace(epsilon: epsilon)
-            let clampedCount = max(Float(kMin), noisyCount)
-            let intensity = min(1.0, clampedCount / 20.0) // lower cap than live presence
+            let noisyScore = score + laplace(epsilon: epsilon) * 0.1
+            let intensity = min(1.0, max(0, noisyScore))
 
             heatTiles.append(HeatTile(
                 tileID: tileStr,
                 intensity: intensity,
-                contributorCount: Int(clampedCount)
+                contributorCount: contributorCount
             ))
         }
 
@@ -89,61 +91,55 @@ struct AlignedHeatController: RouteCollection {
 
     // MARK: - Similar Users
 
-    private func getSimilarUsers(deviceID: String, sql: SQLDatabase, req: Request) async throws -> [String] {
-        // Check Redis cache
-        let cacheKey = RedisKey("aligned:\(deviceID)")
-        let cached = try? await req.redis.send(command: "SMEMBERS", with: [
-            .init(from: cacheKey.rawValue)
-        ]).get()
+    /// Read precomputed tidepool matches, fall back to inline computation for new users.
+    private func getSimilarUsers(deviceID: String, sql: SQLDatabase, req: Request) async throws -> [(id: String, similarity: Float)] {
+        // Read from precomputed tidepools table
+        let rows = try await sql.raw(SQLQueryString("""
+            SELECT match_id::text as device_id, similarity_score
+            FROM tidepools
+            WHERE device_id = '\(unsafeRaw: deviceID)'::uuid
+            ORDER BY similarity_score DESC
+            """)).all(decoding: SimilarRow.self)
 
-        if let cached, let members = cached.array, !members.isEmpty {
-            return members.compactMap { $0.string }
+        if !rows.isEmpty {
+            return rows.map { (id: $0.device_id, similarity: $0.similarity_score) }
         }
 
-        // Compute: weighted multi-vector similarity
-        // Try multi-vector first, fall back to single vector
-        let rows = try await sql.raw(SQLQueryString("""
-            SELECT p2.device_id::text as device_id
+        // Fallback for users with no precomputed tidepool yet
+        req.logger.info("[AlignedHeat] No precomputed tidepool for \(deviceID), using inline")
+        let fallback = try await sql.raw(SQLQueryString("""
+            SELECT p2.device_id::text as device_id,
+                   1.0 - (p1.interest_vector <=> p2.interest_vector) as similarity_score
             FROM device_profiles p1
             CROSS JOIN device_profiles p2
             WHERE p1.device_id = '\(unsafeRaw: deviceID)'::uuid
               AND p2.device_id != '\(unsafeRaw: deviceID)'::uuid
               AND p2.quality != 'poor'
-            ORDER BY
-                CASE
-                    WHEN p1.places_vector IS NOT NULL AND p2.places_vector IS NOT NULL
-                    THEN 0.5 * (p1.places_vector <=> p2.places_vector)
-                         + 0.3 * COALESCE(p1.music_vector <=> p2.music_vector, 1)
-                         + 0.2 * COALESCE(p1.vibe_vector <=> p2.vibe_vector, 1)
-                    ELSE p1.interest_vector <=> p2.interest_vector
-                END
-            LIMIT 50
-            """)).all(decoding: DeviceIDRow.self)
+            ORDER BY p1.interest_vector <=> p2.interest_vector
+            LIMIT 100
+            """)).all(decoding: SimilarRow.self)
 
-        let ids = rows.map { $0.device_id }
-
-        // Cache in Redis for 15 min
-        if !ids.isEmpty {
-            for id in ids {
-                _ = try? await req.redis.send(command: "SADD", with: [
-                    .init(from: cacheKey.rawValue),
-                    .init(from: id)
-                ]).get()
-            }
-            _ = try? await req.redis.send(command: "EXPIRE", with: [
-                .init(from: cacheKey.rawValue),
-                .init(from: "900")
-            ]).get()
-        }
-
-        return ids
+        return fallback.map { (id: $0.device_id, similarity: $0.similarity_score) }
     }
 
-    private struct DeviceIDRow: Decodable { let device_id: String }
-    private struct VisitHeatRow: Decodable {
+    private struct SimilarRow: Decodable {
+        let device_id: String
+        let similarity_score: Float
+    }
+
+    private struct WeightedVisitRow: Decodable {
+        let device_id: String
         let latitude: Double
         let longitude: Double
-        let contributor_count: Int
+        let hour_of_day: Int
+        let visit_count: Int
+    }
+
+    /// Gaussian decay centered on current hour (sigma = 2 hours).
+    private func gaussianTimeRelevance(visitHour: Int, currentHour: Int) -> Float {
+        let diff = min(abs(visitHour - currentHour), 24 - abs(visitHour - currentHour))
+        let sigma: Float = 2.0
+        return exp(-Float(diff * diff) / (2 * sigma * sigma))
     }
 
     private func laplace(epsilon: Float) -> Float {

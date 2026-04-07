@@ -46,6 +46,7 @@ func configure(_ app: Application) throws {
     app.migrations.add(CreateFavorites())
     app.migrations.add(CreateVisits())
     app.migrations.add(AddMultiVectors())
+    app.migrations.add(CreateTidepools())
 
     // MARK: - JWT
 
@@ -55,6 +56,10 @@ func configure(_ app: Application) throws {
     // MARK: - Middleware
 
     app.middleware.use(ErrorMiddleware.default(environment: app.environment))
+
+    // MARK: - Background Jobs
+
+    app.lifecycle.use(BackgroundScheduler())
 
     // MARK: - Routes
 
