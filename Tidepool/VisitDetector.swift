@@ -328,6 +328,13 @@ final class VisitDetector: NSObject {
         flushToServer()
     }
 
+    /// Update a specific pending visit (for re-linking to correct POI).
+    func updateVisit(at index: Int, with visit: VisitReport) {
+        guard index < pendingVisits.count else { return }
+        pendingVisits[index] = visit
+        savePending()
+    }
+
     /// Remove a specific pending visit by index.
     func removeVisit(at index: Int) {
         guard index < pendingVisits.count else { return }

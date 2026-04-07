@@ -32,6 +32,7 @@ struct ProfileView: View {
     @State private var showingPendingVisits = false
     @State private var showingAddHiddenPlace = false
     @State private var showingPhotoPlaces = false
+    @State private var selectedVisitIndex: Int? = nil
     @AppStorage("home_address") private var homeAddress: String = ""
     @AppStorage("hidden_places_data") private var hiddenPlacesData: Data = Data()
 
@@ -1028,58 +1029,66 @@ struct ProfileView: View {
         .sheet(isPresented: $showingPendingVisits) {
             PendingVisitsSheet(onDismiss: {
                 showingPendingVisits = false
-                loadVisitData() // refresh counts
+                loadVisitData()
             })
+        }
+        .sheet(isPresented: Binding(
+            get: { selectedVisitIndex != nil },
+            set: { if !$0 { selectedVisitIndex = nil } }
+        )) {
+            if let index = selectedVisitIndex, index < VisitDetector.shared.pendingVisits.count {
+                VisitDetailSheet(
+                    visitIndex: index,
+                    onUpdate: { loadVisitData(); pendingVisitCount = VisitDetector.shared.pendingVisits.count },
+                    onDelete: { selectedVisitIndex = nil; loadVisitData(); pendingVisitCount = VisitDetector.shared.pendingVisits.count }
+                )
+            }
         }
     }
 
     private let visitColors: [Color] = [.cyan, .blue, .teal, .indigo, .purple, .green, .orange, .mint]
 
     private func pendingVisitRow(_ visit: VisitReport, index: Int) -> some View {
-        let color = visitColors[index % visitColors.count]
         let iso = ISO8601DateFormatter()
         let date = iso.date(from: visit.arrivedAt)
         let timeStr = date.map { RelativeDateTimeFormatter().localizedString(for: $0, relativeTo: Date()) } ?? visit.arrivedAt
 
-        return HStack(spacing: 12) {
-            Image(systemName: "clock.arrow.circlepath")
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(.white)
-                .frame(width: 34, height: 34)
-                .background(Color.orange.gradient)
-                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        return Button {
+            selectedVisitIndex = index
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "clock.arrow.circlepath")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 34, height: 34)
+                    .background(Color.orange.gradient)
+                    .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text(visit.name)
-                    .font(.subheadline)
-                    .fontWeight(.medium)
-                    .lineLimit(1)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(visit.name)
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
 
-                HStack(spacing: 6) {
-                    Text("\(visit.durationMinutes)m")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text(timeStr)
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
+                    HStack(spacing: 6) {
+                        Text("\(visit.durationMinutes)m")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text(timeStr)
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
                 }
-            }
 
-            Spacer()
+                Spacer()
 
-            // Delete button
-            Button {
-                VisitDetector.shared.removeVisit(at: index)
-                pendingVisitCount = VisitDetector.shared.pendingVisits.count
-            } label: {
-                Image(systemName: "xmark")
+                Image(systemName: "chevron.right")
                     .font(.caption2)
-                    .fontWeight(.bold)
-                    .foregroundStyle(.secondary)
-                    .frame(width: 24, height: 24)
+                    .foregroundStyle(.tertiary)
             }
-            .buttonStyle(.plain)
         }
+        .buttonStyle(.plain)
         .padding(.horizontal, 20)
         .padding(.vertical, 6)
     }
@@ -2147,6 +2156,242 @@ struct PhotoPlacesSheet: View {
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity)
+    }
+}
+
+// MARK: - Visit Detail Sheet
+
+struct VisitDetailSheet: View {
+    let visitIndex: Int
+    let onUpdate: () -> Void
+    let onDelete: () -> Void
+    @Environment(\.dismiss) private var dismiss
+    @StateObject private var searchCompleter = PlaceSearchCompleter()
+    @State private var searchText = ""
+    @State private var showingRelink = false
+    @State private var suppressNextChange = false
+
+    private var visit: VisitReport? {
+        guard visitIndex < VisitDetector.shared.pendingVisits.count else { return nil }
+        return VisitDetector.shared.pendingVisits[visitIndex]
+    }
+
+    var body: some View {
+        NavigationView {
+            ScrollView {
+                if let visit {
+                    VStack(spacing: 16) {
+                        // Mini map
+                        Map(initialPosition: .region(MKCoordinateRegion(
+                            center: CLLocationCoordinate2D(latitude: visit.latitude, longitude: visit.longitude),
+                            span: MKCoordinateSpan(latitudeDelta: 0.003, longitudeDelta: 0.003)
+                        ))) {
+                            Marker(visit.name, coordinate: CLLocationCoordinate2D(latitude: visit.latitude, longitude: visit.longitude))
+                                .tint(.orange)
+                        }
+                        .frame(height: 200)
+                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+
+                        // Info card
+                        VStack(alignment: .leading, spacing: 12) {
+                            HStack {
+                                Text(visit.name)
+                                    .font(.title3)
+                                    .fontWeight(.bold)
+                                Spacer()
+                                Text(visit.source)
+                                    .font(.caption2)
+                                    .fontWeight(.semibold)
+                                    .foregroundStyle(.white)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 3)
+                                    .background(visit.source == "visit" ? Color.blue : Color.orange)
+                                    .clipShape(Capsule())
+                            }
+
+                            HStack(spacing: 16) {
+                                Label(visit.category.rawValue, systemImage: "tag")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                                Label("\(visit.durationMinutes) min", systemImage: "clock")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            let iso = ISO8601DateFormatter()
+                            if let date = iso.date(from: visit.arrivedAt) {
+                                Label(date.formatted(date: .abbreviated, time: .shortened), systemImage: "calendar")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            Label(String(format: "%.5f, %.5f", visit.latitude, visit.longitude), systemImage: "location")
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
+
+                            Label("Confidence: \(Int(visit.confidence * 100))%", systemImage: "gauge.medium")
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
+                        }
+                        .padding(16)
+                        .background(.regularMaterial)
+                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+
+                        // Re-link button
+                        Button { showingRelink = true } label: {
+                            HStack {
+                                Image(systemName: "arrow.triangle.2.circlepath")
+                                    .font(.subheadline)
+                                Text("Link to different place")
+                                    .font(.subheadline)
+                                    .fontWeight(.medium)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 14)
+                            .background(Color.blue.opacity(0.1))
+                            .foregroundStyle(.blue)
+                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+
+                        // Delete button
+                        Button {
+                            VisitDetector.shared.removeVisit(at: visitIndex)
+                            onDelete()
+                        } label: {
+                            HStack {
+                                Image(systemName: "trash")
+                                    .font(.subheadline)
+                                Text("Delete check-in")
+                                    .font(.subheadline)
+                                    .fontWeight(.medium)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 14)
+                            .background(Color.red.opacity(0.1))
+                            .foregroundStyle(.red)
+                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(16)
+                }
+            }
+            .background(Color(UIColor.systemGroupedBackground))
+            .navigationTitle("Check-in Detail")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
+                }
+            }
+            .sheet(isPresented: $showingRelink) {
+                relinkSheet
+            }
+        }
+    }
+
+    private var relinkSheet: some View {
+        NavigationView {
+            VStack(spacing: 0) {
+                HStack(spacing: 10) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    TextField("Search for the correct place...", text: $searchText)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 16, weight: .medium))
+                }
+                .padding(.horizontal, 18)
+                .padding(.vertical, 12)
+                .background(Color(UIColor.tertiarySystemFill))
+                .clipShape(Capsule())
+                .padding(.horizontal, 16)
+                .padding(.top, 16)
+
+                if !searchCompleter.suggestions.isEmpty {
+                    List {
+                        ForEach(searchCompleter.suggestions, id: \.self) { suggestion in
+                            Button {
+                                relinkToSuggestion(suggestion)
+                            } label: {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(suggestion.title)
+                                        .font(.subheadline)
+                                        .fontWeight(.medium)
+                                    if !suggestion.subtitle.isEmpty {
+                                        Text(suggestion.subtitle)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .listStyle(.plain)
+                } else {
+                    Spacer()
+                    Text("Search for the place you actually visited")
+                        .font(.subheadline)
+                        .foregroundStyle(.quaternary)
+                    Spacer()
+                }
+            }
+            .fontDesign(.rounded)
+            .navigationTitle("Re-link Place")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Cancel") { showingRelink = false }
+                }
+            }
+            .onChange(of: searchText) { _, newValue in
+                if suppressNextChange { suppressNextChange = false; return }
+                searchCompleter.search(newValue)
+            }
+            .onAppear {
+                if let visit {
+                    searchCompleter.updateRegion(MKCoordinateRegion(
+                        center: CLLocationCoordinate2D(latitude: visit.latitude, longitude: visit.longitude),
+                        latitudinalMeters: 2000, longitudinalMeters: 2000
+                    ))
+                }
+            }
+        }
+    }
+
+    private func relinkToSuggestion(_ suggestion: MKLocalSearchCompletion) {
+        guard let visit else { return }
+
+        let request = MKLocalSearch.Request(completion: suggestion)
+        MKLocalSearch(request: request).start { response, _ in
+            guard let item = response?.mapItems.first else { return }
+
+            let newName = item.name ?? suggestion.title
+            let newCoord = item.placemark.location?.coordinate ?? CLLocationCoordinate2D(latitude: visit.latitude, longitude: visit.longitude)
+            let newCategory = PlaceCategory.from(mapItem: item)
+
+            let updated = VisitReport(
+                poiId: FavoriteLocation.stablePlaceId(name: newName, coordinate: newCoord),
+                yelpId: visit.yelpId,
+                name: newName,
+                category: TidepoolShared.PlaceCategory(rawValue: newCategory.rawValue) ?? .other,
+                latitude: newCoord.latitude,
+                longitude: newCoord.longitude,
+                arrivedAt: visit.arrivedAt,
+                departedAt: visit.departedAt,
+                dayOfWeek: visit.dayOfWeek,
+                hourOfDay: visit.hourOfDay,
+                durationMinutes: visit.durationMinutes,
+                confidence: 1.0,
+                source: visit.source
+            )
+
+            VisitDetector.shared.updateVisit(at: visitIndex, with: updated)
+            onUpdate()
+            showingRelink = false
+        }
     }
 }
 
