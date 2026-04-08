@@ -29,15 +29,29 @@ class YelpEnrichmentManager: ObservableObject {
             return cached
         }
 
-        guard BackendClient.shared.isAuthenticated else { return nil }
+        if !BackendClient.shared.isAuthenticated {
+            print("[Enrichment] Not authenticated, waiting briefly...")
+            // Wait up to 3 seconds for auth to complete
+            for _ in 0..<6 {
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                if BackendClient.shared.isAuthenticated { break }
+            }
+        }
+
+        guard BackendClient.shared.isAuthenticated else {
+            print("[Enrichment] Still not authenticated after waiting, skipping '\(name)'")
+            return nil
+        }
 
         do {
+            print("[Enrichment] Fetching for '\(name)' at \(coordinate.latitude), \(coordinate.longitude)")
             let detail = try await BackendClient.shared.matchPlace(name: name, lat: coordinate.latitude, lng: coordinate.longitude)
+            print("[Enrichment] Got: \(detail.name), rating: \(detail.rating ?? 0), photos: \(detail.photos?.count ?? 0)")
             let enrichment = mapToEnrichment(detail)
             cache[cacheKey] = enrichment
             return enrichment
         } catch {
-            print("[YelpEnrichment] Failed to enrich '\(name)': \(error.localizedDescription)")
+            print("[Enrichment] Failed '\(name)': \(error.localizedDescription)")
             return nil
         }
     }

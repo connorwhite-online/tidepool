@@ -14,16 +14,15 @@ struct SearchController: RouteCollection {
         let payload = try req.auth.require(DevicePayload.self)
         let body = try req.content.decode(PlaceSearchRequest.self)
 
-        guard let clientID = Environment.get("FSQ_CLIENT_ID"),
-              let clientSecret = Environment.get("FSQ_CLIENT_SECRET") else {
-            throw Abort(.internalServerError, reason: "Foursquare credentials not configured")
+        guard let apiKey = Environment.get("GOOGLE_PLACES_KEY") else {
+            throw Abort(.internalServerError, reason: "Google Places API key not configured")
         }
 
-        let fsq = FoursquareService(clientID: clientID, clientSecret: clientSecret)
+        let google = GooglePlacesService(apiKey: apiKey)
         let radiusMeters = body.radiusKm.map { Int($0 * 1000) }
 
-        // Fetch Foursquare results
-        let fsqResults = try await fsq.searchPlaces(
+        // Fetch Google Places results
+        let googleResults = try await google.searchPlaces(
             .init(
                 query: body.query,
                 latitude: body.location.latitude,
@@ -43,43 +42,38 @@ struct SearchController: RouteCollection {
         }
 
         // Map and score results
-        let results: [PlaceSearchResult] = fsqResults.results.enumerated().map { index, place in
-            let categoryNames = (place.categories ?? []).map { $0.name.lowercased() }
+        let results: [PlaceSearchResult] = googleResults.enumerated().map { index, place in
+            let categoryNames = (place.types ?? []).map { $0.lowercased() }
             let alignment = viewerVector.map { vec in
                 computeInterestAlignment(categories: categoryNames, viewerVector: vec)
             } ?? Float(0)
 
-            let ratingScore = ((place.rating ?? 0) / 10.0) // FSQ uses 0-10
-            let positionDecay = 1.0 - Float(index) / Float(max(fsqResults.results.count, 1))
+            let ratingScore = (place.rating ?? 0) / 5.0
+            let positionDecay = 1.0 - Float(index) / Float(max(googleResults.count, 1))
 
             let relevance = 0.4 * ratingScore + 0.3 * alignment + 0.2 * positionDecay + 0.1
 
-            let coordinates = place.geocodes?.main.map { Coordinate(latitude: $0.latitude, longitude: $0.longitude) }
+            let coordinates = place.geometry.map { Coordinate(latitude: $0.location.lat, longitude: $0.location.lng) }
                 ?? body.location
 
-            let photos: [String] = (place.photos ?? []).compactMap { $0.url }
-            let priceStr: String? = place.price.map { String(repeating: "$", count: $0) }
-
-            let hours: [DayHours]? = place.hours?.regular?.map { period in
-                DayHours(day: period.day - 1, start: period.open, end: period.close)
-            }
+            let priceStr: String? = place.priceLevel.map { String(repeating: "$", count: $0) }
 
             return PlaceSearchResult(
-                yelpID: place.fsqId ?? "",
+                yelpID: place.placeId,
                 name: place.name,
-                category: (place.categories ?? []).first?.name ?? "Other",
+                category: (place.types ?? []).first ?? "Other",
                 location: coordinates,
-                rating: place.rating.map { $0 / 2.0 },
+                rating: place.rating,
                 price: priceStr,
-                photos: photos.isEmpty ? nil : photos,
-                hours: hours,
-                isOpenNow: place.hours?.openNow,
+                photos: nil,
+                hours: nil,
+                isOpenNow: place.openingHours?.openNow,
                 relevanceScore: relevance,
                 interestAlignment: alignment
             )
         }.sorted { $0.relevanceScore > $1.relevanceScore }
 
-        let response = PlaceSearchResponse(results: results, total: fsqResults.results.count)
+        let response = PlaceSearchResponse(results: results, total: googleResults.count)
         return try await response.encodeResponse(for: req)
     }
 

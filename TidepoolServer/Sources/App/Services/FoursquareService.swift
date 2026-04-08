@@ -100,12 +100,14 @@ struct FoursquareService {
             name.lowercased().contains(place.name.lowercased())
         } ?? searchResult.results.first
 
-        if let match {
-            try? await req.redis.set(RedisKey(cacheKey), toJSON: match)
-            _ = try? await req.redis.expire(RedisKey(cacheKey), after: .seconds(86400))
-        }
+        // Fetch full details for the matched venue (includes rating, photos, hours)
+        guard let match, let fsqId = match.fsqId else { return match }
+        let detailed = try await getPlaceDetails(fsqID: fsqId, on: req)
 
-        return match
+        try? await req.redis.set(RedisKey(cacheKey), toJSON: detailed)
+        _ = try? await req.redis.expire(RedisKey(cacheKey), after: .seconds(86400))
+
+        return detailed
     }
 
     // MARK: - HTTP

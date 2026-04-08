@@ -48,13 +48,15 @@ struct TidepoolApp: App {
                 .fontDesign(.rounded)
                 .environment(\.font, .system(.body, design: .rounded))
                 .task {
-                    // Auto debug-auth on launch if not authenticated
                     #if DEBUG
-                    if !BackendClient.shared.isAuthenticated {
-                        try? await BackendClient.shared.debugAuthenticate()
-                        if BackendClient.shared.isAuthenticated {
-                            print("[App] Debug authenticated with local server")
-                        }
+                    // Always re-auth in debug to ensure fresh token against local server
+                    print("[App] Debug auth: attempting against local server...")
+                    BackendClient.shared.logout() // clear any stale credentials
+                    do {
+                        try await BackendClient.shared.debugAuthenticate()
+                        print("[App] Debug auth: SUCCESS, isAuthenticated=\(BackendClient.shared.isAuthenticated)")
+                    } catch {
+                        print("[App] Debug auth: FAILED - \(error.localizedDescription)")
                     }
                     #endif
                 }
