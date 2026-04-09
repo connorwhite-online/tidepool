@@ -1,6 +1,7 @@
 import Foundation
 import CoreLocation
 import SwiftUI
+import TidepoolShared
 
 // MARK: - Interest Vector Computation System
 
@@ -17,55 +18,8 @@ class InterestVectorManager: ObservableObject {
     private let appleMusicManager: AppleMusicIntegrationManager?
     private let ageRangeManager: AgeRangeManager?
 
-    // Canonical vocabulary for interest tags (expanded with music genres)
-    private let vocabulary = [
-        // Venue types
-        "dining", "restaurant", "cafe", "coffee", "bar", "nightlife", "fast_food",
-        "fine_dining", "bakery", "grocery", "shopping", "mall", "bookstore",
-        "wine_bar", "craft_beer", "cocktails", "brewery",
-
-        // Activities & Recreation
-        "outdoor", "nature", "park", "beach", "hiking", "fitness", "gym", "sports",
-        "entertainment", "movies", "theater", "museum", "culture", "arts",
-        "music", "live_music", "concerts",
-
-        // Social & Lifestyle
-        "social", "casual", "work", "study", "quiet", "family_friendly",
-        "romantic", "business", "networking", "date_night", "all_ages",
-
-        // Characteristics
-        "convenient", "trendy", "local", "tourist", "hidden_gem", "popular",
-        "affordable", "upscale", "budget", "luxury", "good_value",
-
-        // Services & Amenities
-        "wifi", "parking", "takeout", "delivery", "reservations", "pet_friendly",
-        "accessible", "outdoor_seating", "drive_through",
-
-        // Time & Frequency
-        "daily", "weekly", "special_occasion", "regular", "frequent", "occasional",
-
-        // Quality indicators
-        "highly_rated", "recommended", "favorite", "must_visit", "avoid",
-
-        // Mood & Context
-        "relaxing", "energetic", "productive", "creative", "inspiring",
-        "comfortable", "atmospheric", "cozy", "modern", "traditional",
-
-        // Music Genres
-        "rock", "pop", "hip_hop", "rap", "electronic", "dance", "jazz", "blues",
-        "classical", "country", "folk", "metal", "r_and_b", "soul", "funk",
-        "reggae", "latin", "world", "indie", "alternative", "punk", "ambient",
-
-        // Music Sub-genres
-        "house", "techno", "trance", "dubstep", "trap", "lofi", "synthwave",
-
-        // Music Styles / Vibes
-        "acoustic", "instrumental", "vocal", "orchestral", "chill", "upbeat",
-        "melancholic", "experimental", "progressive", "classic", "retro",
-
-        // Music Activities
-        "party", "workout", "mainstream", "underground"
-    ]
+    // Canonical vocabulary shared between client and server (from TidepoolShared)
+    private let vocabulary = InterestVocabulary.tags
     
     enum VectorQuality {
         case poor      // 0-25% data coverage
@@ -116,8 +70,94 @@ class InterestVectorManager: ObservableObject {
         currentVector = vectorFromTags(allTags)
         vectorQuality = assessVectorQuality(allTags)
         lastUpdated = Date()
-        
+
         saveVector()
+        uploadVectorToServer()
+    }
+
+    /// Upload multi-vector payload to the backend.
+    private func uploadVectorToServer() {
+        guard !currentVector.isEmpty else { return }
+
+        let qualityString: String
+        switch vectorQuality {
+        case .poor: qualityString = "poor"
+        case .fair: qualityString = "fair"
+        case .good: qualityString = "good"
+        case .excellent: qualityString = "excellent"
+        }
+
+        // Collect raw music genres (preserving granularity)
+        let musicGenres = collectRawMusicGenres()
+
+        // Collect place POI frequencies from visit history + favorites
+        let placePois = collectPlacePois()
+
+        let multiRequest = MultiVectorRequest(
+            musicGenres: musicGenres,
+            placePois: placePois,
+            vibeVector: currentVector,
+            quality: qualityString,
+            activeSources: getActiveDataSources()
+        )
+
+        Task {
+            do {
+                let _ = try await BackendClient.shared.uploadMultiVector(multiRequest)
+                print("[InterestVectorManager] Multi-vector uploaded (music: \(musicGenres.count) genres, places: \(placePois.count) POIs, vibe: \(currentVector.count) dims)")
+            } catch {
+                // Fallback: try legacy single-vector upload
+                let legacyRequest = ProfileVectorRequest(
+                    vector: currentVector,
+                    quality: qualityString,
+                    activeSources: getActiveDataSources()
+                )
+                let _ = try? await BackendClient.shared.uploadVector(legacyRequest)
+                print("[InterestVectorManager] Multi-vector failed, legacy fallback: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Collect raw genre strings with weights from Spotify + Apple Music (no mapper flattening).
+    private func collectRawMusicGenres() -> [String: Float] {
+        var genres: [String: Float] = [:]
+
+        // Spotify: raw artist genres with position weighting
+        if let spotify = spotifyManager {
+            for (i, artist) in spotify.topArtists.enumerated() {
+                let weight = Float(max(1, 10 - i / 5))
+                for genre in artist.genres {
+                    genres[genre.lowercased(), default: 0] += weight
+                }
+            }
+        }
+
+        // Apple Music: raw genre names from library
+        if let appleMusic = appleMusicManager {
+            for (genre, count) in appleMusic.libraryGenres {
+                genres[genre.lowercased(), default: 0] += Float(min(count, 10))
+            }
+            // Recently played bonus
+            for track in appleMusic.recentlyPlayed {
+                for genre in track.genreNames {
+                    genres[genre.lowercased(), default: 0] += 2.0
+                }
+            }
+        }
+
+        return genres
+    }
+
+    /// Collect POI visit frequencies from VisitDetector + favorites.
+    private func collectPlacePois() -> [String: Float] {
+        var pois: [String: Float] = [:]
+
+        // From favorites (boolean signal — 1.0 per favorite)
+        for fav in favoritesManager.favorites {
+            pois[fav.placeId, default: 0] += 1.0
+        }
+
+        return pois
     }
     
     private func aggregateTagsFromAllSources() -> [String: Float] {
@@ -369,6 +409,165 @@ class InterestVectorManager: ObservableObject {
         return sources
     }
     
+    // MARK: - Per-Source Insights
+
+    struct TagWeight: Identifiable {
+        let id = UUID()
+        let tag: String
+        let weight: Float
+    }
+
+    struct SourceInsight {
+        let name: String
+        let icon: String
+        let color: Color
+        let topTags: [TagWeight]
+        let isConnected: Bool
+    }
+
+    func getSourceInsights() -> [SourceInsight] {
+        var sources: [SourceInsight] = []
+
+        // Favorites — show actual place names and categories
+        let favTags = favoritesRawInsights()
+        sources.append(SourceInsight(
+            name: "Favorites", icon: "star.fill", color: .yellow,
+            topTags: favTags, isConnected: !favoritesManager.favorites.isEmpty
+        ))
+
+        // Spotify — show raw genre strings from artists
+        if let spotify = spotifyManager {
+            let tags = spotifyRawInsights(spotify)
+            sources.append(SourceInsight(
+                name: "Spotify", icon: "waveform", color: .green,
+                topTags: tags, isConnected: !spotify.topArtists.isEmpty
+            ))
+        }
+
+        // Apple Music — show raw genre names from library
+        if let appleMusic = appleMusicManager {
+            let tags = appleMusicRawInsights(appleMusic)
+            sources.append(SourceInsight(
+                name: "Apple Music", icon: "music.note", color: .red,
+                topTags: tags, isConnected: !appleMusic.recentlyPlayed.isEmpty
+            ))
+        }
+
+        // Photos — show inferred place names
+        let photoTags = photosRawInsights()
+        sources.append(SourceInsight(
+            name: "Photos", icon: "photo.fill", color: .orange,
+            topTags: photoTags, isConnected: !photosManager.clusters.isEmpty
+        ))
+
+        return sources
+    }
+
+    /// Favorites: show category breakdown by actual place categories
+    private func favoritesRawInsights() -> [TagWeight] {
+        var categoryCounts: [String: Int] = [:]
+        for fav in favoritesManager.favorites {
+            categoryCounts[fav.category.displayName, default: 0] += 1
+        }
+        return topWeighted(from: categoryCounts)
+    }
+
+    /// Spotify: show raw genre strings from top artists (no mapper)
+    private func spotifyRawInsights(_ spotify: SpotifyIntegrationManager) -> [TagWeight] {
+        var genreCounts: [String: Int] = [:]
+        for (i, artist) in spotify.topArtists.enumerated() {
+            let weight = max(1, 10 - i / 5)
+            for genre in artist.genres {
+                genreCounts[genre, default: 0] += weight
+            }
+        }
+        return topWeighted(from: genreCounts)
+    }
+
+    /// Apple Music: show raw genre names from library, artists, and recently played
+    private func appleMusicRawInsights(_ appleMusic: AppleMusicIntegrationManager) -> [TagWeight] {
+        var genreCounts: [String: Int] = [:]
+        for (genre, count) in appleMusic.libraryGenres {
+            genreCounts[genre, default: 0] += count
+        }
+        for track in appleMusic.recentlyPlayed {
+            for genre in track.genreNames {
+                genreCounts[genre, default: 0] += 2
+            }
+        }
+        // Also pull from library artists if genres are sparse
+        for artist in appleMusic.libraryArtists {
+            for genre in artist.genres {
+                genreCounts[genre, default: 0] += 1
+            }
+        }
+        return topWeighted(from: genreCounts)
+    }
+
+    /// Check if a photo cluster has a legit-looking place name
+    static func isLegitPlaceName(_ cluster: PhotoLocationCluster) -> Bool {
+        guard let name = cluster.inferredName, !name.isEmpty, cluster.category != .other else { return false }
+        if name.count <= 2 { return false }
+        if name.first?.isNumber == true { return false } // "3071 N San Fernando Rd"
+        // Filter ALL CAPS names (geocoder artifacts like "K PLACE")
+        let letters = name.filter { $0.isLetter }
+        if !letters.isEmpty && letters == letters.uppercased() { return false }
+        return true
+    }
+
+    /// Filter out clusters near home or hidden places (500ft / 152.4m)
+    private func filterExclusionZones(_ clusters: [PhotoLocationCluster]) -> [PhotoLocationCluster] {
+        let exclusionRadius: Double = 152.4
+        var exclusionPoints: [CLLocation] = []
+
+        // Home
+        if let data = UserDefaults.standard.data(forKey: "home_location"),
+           let coords = try? JSONDecoder().decode([Double].self, from: data), coords.count == 2 {
+            exclusionPoints.append(CLLocation(latitude: coords[0], longitude: coords[1]))
+        }
+
+        // Hidden places
+        if let data = UserDefaults.standard.data(forKey: "hidden_places_data"),
+           let places = try? JSONDecoder().decode([HiddenPlace].self, from: data) {
+            for place in places {
+                exclusionPoints.append(CLLocation(latitude: place.latitude, longitude: place.longitude))
+            }
+        }
+
+        guard !exclusionPoints.isEmpty else { return clusters }
+
+        return clusters.filter { cluster in
+            let clusterLoc = CLLocation(latitude: cluster.centerCoordinate.latitude, longitude: cluster.centerCoordinate.longitude)
+            return !exclusionPoints.contains { $0.distance(from: clusterLoc) < exclusionRadius }
+        }
+    }
+
+    /// Photos: matched places vs unmatched locations
+    private func photosRawInsights() -> [TagWeight] {
+        let nonHome = filterExclusionZones(photosManager.clusters.filter { $0.category != .home })
+        guard !nonHome.isEmpty else { return [] }
+
+        let matched = nonHome.filter { Self.isLegitPlaceName($0) }
+        let unmatchedCount = nonHome.count - matched.count
+        let total = Float(nonHome.count)
+
+        var results: [TagWeight] = []
+        if !matched.isEmpty {
+            results.append(TagWeight(tag: "\(matched.count) places found", weight: Float(matched.count) / total))
+        }
+        if unmatchedCount > 0 {
+            results.append(TagWeight(tag: "\(unmatchedCount) no match", weight: Float(unmatchedCount) / total))
+        }
+        return results
+    }
+
+    private func topWeighted(from counts: [String: Int], limit: Int = 6) -> [TagWeight] {
+        let sorted = counts.sorted { $0.value > $1.value }.prefix(limit)
+        let total = Float(sorted.reduce(0) { $0 + $1.value })
+        guard total > 0 else { return [] }
+        return sorted.map { TagWeight(tag: $0.key, weight: Float($0.value) / total) }
+    }
+
     // MARK: - Persistence
     
     private func saveVector() {
@@ -415,84 +614,116 @@ struct InterestInsights {
 struct InterestVectorView: View {
     @ObservedObject var vectorManager: InterestVectorManager
     @State private var showingDetails = false
-    
+
+    private let tagColors: [Color] = [.pink, .purple, .blue, .cyan, .teal, .green, .orange, .red, .indigo, .mint]
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                Text("Interest Profile")
-                    .font(.headline)
-                
+        let insights = vectorManager.getInterestInsights()
+
+        VStack(spacing: 16) {
+            // Quality ring
+            HStack(spacing: 14) {
+                ZStack {
+                    Circle()
+                        .stroke(Color(UIColor.quaternarySystemFill), lineWidth: 4)
+                        .frame(width: 44, height: 44)
+                    Circle()
+                        .trim(from: 0, to: qualityProgress)
+                        .stroke(
+                            colorForQuality(vectorManager.vectorQuality).gradient,
+                            style: StrokeStyle(lineWidth: 4, lineCap: .round)
+                        )
+                        .frame(width: 44, height: 44)
+                        .rotationEffect(.degrees(-90))
+                    Text(qualityEmoji)
+                        .font(.system(size: 18))
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(vectorManager.vectorQuality.description + " profile")
+                        .font(.subheadline)
+                        .fontWeight(.semibold)
+
+                    Text("\(insights.dataSourcesActive.count) source\(insights.dataSourcesActive.count == 1 ? "" : "s") connected")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
                 Spacer()
-                
+
                 Button {
                     vectorManager.computeVector()
                     HapticFeedbackManager.shared.selection()
                 } label: {
                     Image(systemName: "arrow.clockwise")
-                        .font(.caption)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-            }
-            
-            // Quality indicator
-            HStack {
-                Circle()
-                    .fill(colorForQuality(vectorManager.vectorQuality))
-                    .frame(width: 8, height: 8)
-                
-                Text(vectorManager.vectorQuality.description)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                
-                if let lastUpdated = vectorManager.lastUpdated {
-                    Text("• Updated \(lastUpdated, style: .relative) ago")
-                        .font(.caption)
+                        .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(.secondary)
+                        .frame(width: 32, height: 32)
+                        .background(Color(UIColor.quaternarySystemFill))
+                        .clipShape(Circle())
                 }
+                .buttonStyle(.plain)
             }
-            
-            // Top interests preview
-            let insights = vectorManager.getInterestInsights()
+
+            // Interest bubbles
             if !insights.topInterests.isEmpty {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Top interests")
-                        .font(.subheadline)
-                        .fontWeight(.medium)
-                    
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 8) {
-                            ForEach(insights.topInterests.prefix(5), id: \.self) { interest in
-                                Text(interest.capitalized)
-                                    .font(.caption)
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 4)
-                                    .background(.quaternary)
-                                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                            }
-                        }
-                        .padding(.horizontal, 1)
+                FlowLayout(spacing: 8) {
+                    ForEach(Array(insights.topInterests.prefix(8).enumerated()), id: \.offset) { i, interest in
+                        Text(interest.capitalized.replacingOccurrences(of: "_", with: " "))
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                            .foregroundStyle(tagColors[i % tagColors.count])
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 7)
+                            .background(tagColors[i % tagColors.count].opacity(0.12))
+                            .clipShape(Capsule())
                     }
                 }
             }
-            
-            // Show details button
+
+            // Explore button
             Button {
                 showingDetails = true
             } label: {
-                Text("View detailed profile")
-                    .font(.caption)
-                    .foregroundStyle(.blue)
+                HStack {
+                    Text("Explore your full profile")
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+                .background(Color(UIColor.secondarySystemGroupedBackground))
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             }
+            .buttonStyle(.plain)
         }
-        .padding()
-        .background(.quaternary.opacity(0.5))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
         .sheet(isPresented: $showingDetails) {
             InterestInsightsDetailView(vectorManager: vectorManager)
         }
     }
-    
+
+    private var qualityProgress: CGFloat {
+        switch vectorManager.vectorQuality {
+        case .poor: return 0.15
+        case .fair: return 0.4
+        case .good: return 0.7
+        case .excellent: return 1.0
+        }
+    }
+
+    private var qualityEmoji: String {
+        switch vectorManager.vectorQuality {
+        case .poor: return "🌱"
+        case .fair: return "🌿"
+        case .good: return "🌳"
+        case .excellent: return "✨"
+        }
+    }
+
     private func colorForQuality(_ quality: InterestVectorManager.VectorQuality) -> Color {
         switch quality {
         case .poor: return .red
@@ -503,120 +734,186 @@ struct InterestVectorView: View {
     }
 }
 
+/// Simple flow layout that wraps content to the next line.
+struct FlowLayout: Layout {
+    var spacing: CGFloat = 8
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let result = arrange(proposal: proposal, subviews: subviews)
+        return result.size
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let result = arrange(proposal: proposal, subviews: subviews)
+        for (index, position) in result.positions.enumerated() {
+            subviews[index].place(at: CGPoint(x: bounds.minX + position.x, y: bounds.minY + position.y), proposal: .unspecified)
+        }
+    }
+
+    private func arrange(proposal: ProposedViewSize, subviews: Subviews) -> (positions: [CGPoint], size: CGSize) {
+        let maxWidth = proposal.width ?? .infinity
+        var positions: [CGPoint] = []
+        var x: CGFloat = 0
+        var y: CGFloat = 0
+        var rowHeight: CGFloat = 0
+        var maxX: CGFloat = 0
+
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            if x + size.width > maxWidth && x > 0 {
+                x = 0
+                y += rowHeight + spacing
+                rowHeight = 0
+            }
+            positions.append(CGPoint(x: x, y: y))
+            rowHeight = max(rowHeight, size.height)
+            x += size.width + spacing
+            maxX = max(maxX, x - spacing)
+        }
+
+        return (positions, CGSize(width: maxX, height: y + rowHeight))
+    }
+}
+
+// MARK: - Donut Skeleton
+
+struct DonutSkeletonView: View {
+    @State private var shimmer = false
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 24) {
+            // Skeleton donut ring
+            Circle()
+                .stroke(Color(UIColor.quaternarySystemFill), lineWidth: 14)
+                .frame(width: 64, height: 64)
+
+            // Skeleton legend rows
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(0..<4, id: \.self) { i in
+                    HStack(spacing: 8) {
+                        Circle()
+                            .fill(Color(UIColor.quaternarySystemFill))
+                            .frame(width: 8, height: 8)
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(Color(UIColor.quaternarySystemFill))
+                            .frame(width: CGFloat([90, 70, 110, 60][i]), height: 10)
+                        Spacer()
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(Color(UIColor.quaternarySystemFill))
+                            .frame(width: 28, height: 10)
+                    }
+                }
+            }
+        }
+        .opacity(shimmer ? 0.4 : 1.0)
+        .animation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true), value: shimmer)
+        .onAppear { shimmer = true }
+    }
+}
+
+// MARK: - Reusable Donut Chart
+
+struct DonutChartView: View {
+    let tags: [InterestVectorManager.TagWeight]
+    var size: CGFloat = 72
+    var lineWidth: CGFloat = 16
+
+    private let colors: [Color] = [.purple, .blue, .cyan, .teal, .green, .orange, .red, .indigo, .mint, .yellow]
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 24) {
+            ZStack {
+                ForEach(Array(tags.enumerated()), id: \.offset) { i, tagWeight in
+                    let start = tags.prefix(i).reduce(Float(0)) { $0 + $1.weight }
+                    let end = start + tagWeight.weight
+                    Circle()
+                        .trim(from: CGFloat(start), to: CGFloat(end))
+                        .stroke(
+                            colors[i % colors.count].gradient,
+                            style: StrokeStyle(lineWidth: lineWidth, lineCap: .butt)
+                        )
+                        .rotationEffect(.degrees(-90))
+                }
+            }
+            .frame(width: size, height: size)
+
+            VStack(alignment: .leading, spacing: 5) {
+                ForEach(Array(tags.enumerated()), id: \.offset) { i, tagWeight in
+                    HStack(spacing: 8) {
+                        Circle()
+                            .fill(colors[i % colors.count])
+                            .frame(width: 8, height: 8)
+                        Text(tagWeight.tag.capitalized.replacingOccurrences(of: "_", with: " "))
+                            .font(.caption)
+                            .fontWeight(.medium)
+                            .lineLimit(1)
+                        Spacer()
+                        Text("\(Int(tagWeight.weight * 100))%")
+                            .font(.caption2)
+                            .fontWeight(.semibold)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+    }
+}
+
 // MARK: - Detailed Interest Insights View
 
 struct InterestInsightsDetailView: View {
     @ObservedObject var vectorManager: InterestVectorManager
     @Environment(\.dismiss) private var dismiss
-    
+
     var body: some View {
         NavigationView {
             ScrollView {
+                let sources = vectorManager.getSourceInsights()
                 let insights = vectorManager.getInterestInsights()
-                
-                VStack(alignment: .leading, spacing: 24) {
-                    // Overview section
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("Profile Overview")
-                            .font(.title2)
-                            .fontWeight(.semibold)
-                        
-                        HStack {
-                            VStack(alignment: .leading) {
-                                Text("Quality")
+
+                VStack(spacing: 20) {
+                    // Blended top interests header
+                    VStack(spacing: 12) {
+                        Text("Your Blended Taste")
+                            .font(.title3)
+                            .fontWeight(.bold)
+
+                        FlowLayout(spacing: 8) {
+                            ForEach(Array(vectorManager.getTopInterests(limit: 8).enumerated()), id: \.offset) { i, interest in
+                                let colors: [Color] = [.pink, .purple, .blue, .cyan, .teal, .green, .orange, .indigo]
+                                let c = colors[i % colors.count]
+                                Text(interest.tag.capitalized.replacingOccurrences(of: "_", with: " "))
                                     .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                Text(insights.vectorQuality.description)
-                                    .font(.headline)
-                            }
-                            
-                            Spacer()
-                            
-                            VStack(alignment: .trailing) {
-                                Text("Diversity")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                Text(insights.diversityDescription)
-                                    .font(.headline)
+                                    .fontWeight(.semibold)
+                                    .foregroundStyle(c)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 7)
+                                    .background(c.opacity(0.12))
+                                    .clipShape(Capsule())
                             }
                         }
-                        .padding()
-                        .background(.quaternary)
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
+
+                        // Diversity badge
+                        Text(insights.diversityDescription)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
-                    
-                    // Data sources
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Data Sources")
-                            .font(.headline)
-                        
-                        ForEach(insights.dataSourcesActive, id: \.self) { source in
-                            HStack {
-                                Image(systemName: "checkmark.circle.fill")
-                                    .foregroundStyle(.green)
-                                Text(source)
-                                    .font(.subheadline)
-                                Spacer()
-                            }
-                        }
-                        
-                        if insights.dataSourcesActive.count < 3 {
-                            Text("Connect more data sources to improve your recommendations")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .padding(.top, 4)
-                        }
-                    }
-                    
-                    // Top interests
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Interest Breakdown")
-                            .font(.headline)
-                        
-                        ForEach(Array(vectorManager.getTopInterests(limit: 10).enumerated()), id: \.offset) { index, interest in
-                            HStack {
-                                Text("\(index + 1).")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .frame(width: 20, alignment: .leading)
-                                
-                                Text(interest.tag.capitalized)
-                                    .font(.subheadline)
-                                
-                                Spacer()
-                                
-                                // Weight visualization
-                                GeometryReader { geometry in
-                                    RoundedRectangle(cornerRadius: 2)
-                                        .fill(.blue)
-                                        .frame(width: geometry.size.width * CGFloat(interest.weight * 10))
-                                }
-                                .frame(width: 60, height: 4)
-                            }
-                            .padding(.vertical, 2)
-                        }
-                    }
-                    
-                    // Dominant categories
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Favorite Categories")
-                            .font(.headline)
-                        
-                        ForEach(insights.dominantCategories, id: \.self) { category in
-                            HStack {
-                                Image(systemName: category.iconName)
-                                    .foregroundStyle(.secondary)
-                                Text(category.displayName)
-                                    .font(.subheadline)
-                                Spacer()
-                            }
-                            .padding(.vertical, 2)
-                        }
+                    .padding(20)
+                    .frame(maxWidth: .infinity)
+                    .background(.regularMaterial)
+                    .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+
+                    // Per-source cards
+                    ForEach(Array(sources.enumerated()), id: \.offset) { _, source in
+                        sourceCard(source)
                     }
                 }
-                .padding()
+                .padding(.horizontal, 16)
+                .padding(.top, 8)
+                .padding(.bottom, 32)
             }
-            .navigationTitle("Interest Profile")
+            .background(Color(UIColor.systemGroupedBackground))
+            .navigationTitle("Your Taste Profile")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -624,6 +921,110 @@ struct InterestInsightsDetailView: View {
                 }
             }
         }
+    }
+
+    private let sliceColors: [Color] = [.purple, .blue, .cyan, .teal, .green, .orange, .red, .indigo, .mint, .yellow]
+
+    private func sourceCard(_ source: InterestVectorManager.SourceInsight) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            // Source header
+            HStack(spacing: 10) {
+                Image(systemName: source.icon)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 34, height: 34)
+                    .background(source.color.gradient)
+                    .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                    .shadow(color: source.color.opacity(0.3), radius: 4, y: 2)
+
+                Text(source.name)
+                    .font(.subheadline)
+                    .fontWeight(.bold)
+
+                Spacer()
+
+                if source.isConnected {
+                    Text("Active")
+                        .font(.caption2)
+                        .fontWeight(.semibold)
+                        .foregroundStyle(.green)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(.green.opacity(0.12))
+                        .clipShape(Capsule())
+                } else {
+                    Text("Not connected")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if source.isConnected && !source.topTags.isEmpty {
+                // Donut + legend layout
+                HStack(alignment: .center, spacing: 24) {
+                    // Donut chart
+                    ZStack {
+                        ForEach(Array(source.topTags.enumerated()), id: \.offset) { i, tagWeight in
+                            let startAngle = sliceStartAngle(for: i, in: source.topTags)
+                            let endAngle = sliceEndAngle(for: i, in: source.topTags)
+                            Circle()
+                                .trim(from: startAngle, to: endAngle)
+                                .stroke(
+                                    sliceColors[i % sliceColors.count].gradient,
+                                    style: StrokeStyle(lineWidth: 16, lineCap: .butt)
+                                )
+                                .rotationEffect(.degrees(-90))
+                        }
+                    }
+                    .frame(width: 72, height: 72)
+
+                    // Legend
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(Array(source.topTags.enumerated()), id: \.offset) { i, tagWeight in
+                            HStack(spacing: 8) {
+                                Circle()
+                                    .fill(sliceColors[i % sliceColors.count])
+                                    .frame(width: 8, height: 8)
+
+                                Text(tagWeight.tag.capitalized.replacingOccurrences(of: "_", with: " "))
+                                    .font(.caption)
+                                    .fontWeight(.medium)
+                                    .lineLimit(1)
+
+                                Spacer()
+
+                                Text("\(Int(tagWeight.weight * 100))%")
+                                    .font(.caption2)
+                                    .fontWeight(.semibold)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+            } else if !source.isConnected {
+                Text("Connect to discover what this reveals about you")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            } else {
+                Text("No signals yet — keep using it!")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .padding(16)
+        .background(.regularMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .shadow(color: source.color.opacity(0.06), radius: 10, y: 3)
+    }
+
+    private func sliceStartAngle(for index: Int, in tags: [InterestVectorManager.TagWeight]) -> CGFloat {
+        let preceding = tags.prefix(index).reduce(Float(0)) { $0 + $1.weight }
+        return CGFloat(preceding)
+    }
+
+    private func sliceEndAngle(for index: Int, in tags: [InterestVectorManager.TagWeight]) -> CGFloat {
+        let through = tags.prefix(index + 1).reduce(Float(0)) { $0 + $1.weight }
+        return CGFloat(through)
     }
 }
 

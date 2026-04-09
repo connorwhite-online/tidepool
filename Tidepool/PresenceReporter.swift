@@ -1,5 +1,6 @@
 import Foundation
 import CoreLocation
+import TidepoolShared
 
 final class PresenceReporter {
     private weak var locationManager: LocationManager?
@@ -40,11 +41,17 @@ final class PresenceReporter {
         defer { scheduleNext() }
         guard let lm = locationManager, let loc = lm.latestLocation else { return }
 
-        // Respect home radius: do not report when within 500 ft of Home
+        // Respect home + hidden places radius: do not report within 500 ft
         if let home = lm.homeLocation {
             let homeCL = CLLocation(latitude: home.latitude, longitude: home.longitude)
-            let distance = loc.distance(from: homeCL)
-            if distance < homeHideRadiusMeters { return }
+            if loc.distance(from: homeCL) < homeHideRadiusMeters { return }
+        }
+        if let data = UserDefaults.standard.data(forKey: "hidden_places_data"),
+           let places = try? JSONDecoder().decode([HiddenPlace].self, from: data) {
+            for place in places {
+                let placeCL = CLLocation(latitude: place.latitude, longitude: place.longitude)
+                if loc.distance(from: placeCL) < homeHideRadiusMeters { return }
+            }
         }
 
         let tileString = Tiling.current.tileIdString(for: loc.coordinate)
@@ -57,9 +64,16 @@ final class PresenceReporter {
         lastReportedTileString = tileString
         lastReportAtForTile[tileString] = now
 
-        // Stub: log instead of network call
-        let epochMs = Int(now.timeIntervalSince1970 * 1000)
+        let epochMs = Int64(now.timeIntervalSince1970 * 1000)
         let jitterMs = Int.random(in: 0...(Int(maxIntervalSec * 1000)))
-        print("[PresenceReporter] would send tile_id=\(tileString) epoch_ms=\(epochMs) client_jitter_ms=\(jitterMs)")
+        let report = PresenceReport(tileID: tileString, epochMs: epochMs, clientJitterMs: jitterMs)
+
+        Task {
+            do {
+                _ = try await BackendClient.shared.reportPresence(report)
+            } catch {
+                print("[PresenceReporter] failed to report: \(error.localizedDescription)")
+            }
+        }
     }
 } 

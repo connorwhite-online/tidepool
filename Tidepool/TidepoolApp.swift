@@ -10,7 +10,14 @@ import UIKit
 
 @main
 struct TidepoolApp: App {
+    @StateObject private var favoritesManager = InAppFavoritesManager()
+
+    @Environment(\.scenePhase) private var scenePhase
+
     init() {
+        // Register background task for visit uploads
+        VisitDetector.shared.registerBackgroundTask()
+
         // UINavigationBar titles
         let navAppearance = UINavigationBarAppearance()
         if let titleDescriptor = UIFontDescriptor.preferredFontDescriptor(withTextStyle: .headline).withDesign(.rounded) {
@@ -37,8 +44,33 @@ struct TidepoolApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .environmentObject(favoritesManager)
                 .fontDesign(.rounded)
                 .environment(\.font, .system(.body, design: .rounded))
+                .task {
+                    #if DEBUG
+                    // Always re-auth in debug to ensure fresh token against local server
+                    print("[App] Debug auth: attempting against local server...")
+                    BackendClient.shared.logout() // clear any stale credentials
+                    do {
+                        try await BackendClient.shared.debugAuthenticate()
+                        print("[App] Debug auth: SUCCESS, isAuthenticated=\(BackendClient.shared.isAuthenticated)")
+                    } catch {
+                        print("[App] Debug auth: FAILED - \(error.localizedDescription)")
+                    }
+                    #endif
+                }
+                .onChange(of: scenePhase) { _, newPhase in
+                    switch newPhase {
+                    case .active:
+                        VisitDetector.shared.startBatchUploads()
+                    case .background:
+                        VisitDetector.shared.stopBatchUploads()
+                        VisitDetector.shared.scheduleBackgroundUpload()
+                    default:
+                        break
+                    }
+                }
         }
     }
 }

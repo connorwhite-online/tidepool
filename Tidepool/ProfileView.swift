@@ -2,6 +2,7 @@ import SwiftUI
 import MapKit
 import Photos
 import Combine
+import TidepoolShared
 
 struct ProfileView: View {
     @Environment(\.dismiss) private var dismiss
@@ -12,7 +13,7 @@ struct ProfileView: View {
     @StateObject private var location = LocationManager()
     @StateObject private var appleMapsManager = AppleMapsIntegrationManager()
     @StateObject private var photosManager = PhotosIntegrationManager()
-    @StateObject private var favoritesManager = InAppFavoritesManager()
+    @EnvironmentObject var favoritesManager: InAppFavoritesManager
     @StateObject private var spotifyManager = SpotifyIntegrationManager()
     @StateObject private var appleMusicManager = AppleMusicIntegrationManager()
     @StateObject private var ageRangeManager = AgeRangeManager()
@@ -22,8 +23,19 @@ struct ProfileView: View {
     @State private var photosDeniedAlert = false
     @State private var showingLocationImport = false
     @State private var showingFavorites = false
+    @State private var showingPlaceSearch = false
     @State private var showingBirthdayPicker = false
     @State private var tempBirthday: Date = Calendar.current.date(byAdding: .year, value: -25, to: Date()) ?? Date()
+    @State private var visitPatterns: [VisitPattern] = []
+    @State private var recentVisits: [VisitReport] = []
+    @State private var isLoadingVisits = false
+    @State private var pendingVisitCount: Int = 0
+    @State private var showingPendingVisits = false
+    @State private var showingAddHiddenPlace = false
+    @State private var showingPhotoPlaces = false
+    @State private var selectedVisitIndex: Int? = nil
+    @AppStorage("home_address") private var homeAddress: String = ""
+    @AppStorage("hidden_places_data") private var hiddenPlacesData: Data = Data()
 
     var body: some View {
         mainForm
@@ -46,22 +58,31 @@ struct ProfileView: View {
                 showingHomePicker: $showingHomePicker,
                 showingLocationImport: $showingLocationImport,
                 showingFavorites: $showingFavorites,
+                showingPlaceSearch: $showingPlaceSearch,
                 photosDeniedAlert: $photosDeniedAlert,
                 location: location,
                 appleMapsManager: appleMapsManager,
-                favoritesManager: favoritesManager
+                favoritesManager: favoritesManager,
+                onHomeSet: { _, address in
+                    homeAddress = address
+                }
             ))
     }
 
     @ViewBuilder
     private var formContent: some View {
-        Form {
-            locationSection
-            integrationsSection
-            interestProfileSection
-            favoritesSection
-            privacySection
+        ScrollView {
+            VStack(spacing: 20) {
+                integrationsCard
+                visitsCard
+                locationCard
+                privacyCard
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 8)
+            .padding(.bottom, 40)
         }
+        .background(Color(UIColor.systemGroupedBackground))
     }
 
     @ToolbarContentBuilder
@@ -98,6 +119,27 @@ struct ProfileView: View {
                 appleMusicManager: appleMusicManager,
                 ageRangeManager: ageRangeManager
             )
+        }
+
+        loadVisitData()
+    }
+
+    private func loadVisitData() {
+        pendingVisitCount = VisitDetector.shared.pendingVisits.count
+
+        guard BackendClient.shared.isAuthenticated else { return }
+        isLoadingVisits = true
+        Task {
+            do {
+                async let patternsTask = BackendClient.shared.getVisitPatterns()
+                async let recentTask = BackendClient.shared.getRecentVisits(limit: 50)
+                let (patternsResult, recentResult) = try await (patternsTask, recentTask)
+                visitPatterns = patternsResult.patterns
+                recentVisits = recentResult
+            } catch {
+                print("[ProfileView] visit data fetch failed: \(error.localizedDescription)")
+            }
+            isLoadingVisits = false
         }
     }
 
@@ -474,6 +516,12 @@ struct ProfileView: View {
             Label("My Favorites", systemImage: "heart.fill")
                 .foregroundStyle(.red)
             Spacer()
+            Button {
+                showingPlaceSearch = true
+            } label: {
+                Image(systemName: "plus")
+            }
+            .buttonStyle(.bordered)
             Button("View All") {
                 showingFavorites = true
             }
@@ -526,6 +574,1005 @@ struct ProfileView: View {
         }
     }
 
+    // MARK: - Card Components
+
+    private var integrationsCard: some View {
+        VStack(spacing: 0) {
+            // Header
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Integrations")
+                    .font(.title3)
+                    .fontWeight(.bold)
+                Text("Connect your interests to help Tidepool find your place")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 20)
+            .padding(.top, 20)
+            .padding(.bottom, 14)
+
+            // Integration cards with inline insights
+            VStack(spacing: 10) {
+                // Birthday
+                Button {
+                    tempBirthday = ageRangeManager.birthday ?? Calendar.current.date(byAdding: .year, value: -25, to: Date()) ?? Date()
+                    showingBirthdayPicker = true
+                } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: "birthday.cake.fill")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 38, height: 38)
+                            .background(Color.pink.gradient)
+                            .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                            .shadow(color: .pink.opacity(0.3), radius: 4, y: 2)
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Birthday")
+                                .font(.subheadline)
+                                .fontWeight(.semibold)
+                                .foregroundStyle(.primary)
+                            if ageRangeManager.isAuthorized {
+                                Text(ageRangeManager.displayAge)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+
+                        Spacer()
+
+                        Image(systemName: ageRangeManager.isAuthorized ? "pencil" : "plus")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(.white)
+                            .frame(width: 28, height: 28)
+                            .background(
+                                LinearGradient(colors: [.blue, .cyan], startPoint: .topLeading, endPoint: .bottomTrailing)
+                            )
+                            .clipShape(Circle())
+                            .shadow(color: .blue.opacity(0.3), radius: 4, y: 2)
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                    .background(Color(UIColor.secondarySystemGroupedBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                }
+                .buttonStyle(.plain)
+
+                // Favorites — special: plus button + tapping opens favorites list
+                favoritesIntegrationCard()
+
+                // Spotify
+                tappableIntegrationCard(
+                    icon: "waveform", title: "Spotify", tint: .green,
+                    isConnected: spotifyManager.isConnected,
+                    isSyncing: spotifyManager.isConnected && spotifyManager.isSyncing,
+                    summary: spotifyManager.getSummary(),
+                    tags: vectorManager?.getSourceInsights().first(where: { $0.name == "Spotify" })?.topTags ?? [],
+                    onConnect: { Task { await spotifyManager.authenticate() } },
+                    onRefresh: { Task { await spotifyManager.refreshData() } },
+                    onDisconnect: { spotifyManager.disconnect() }
+                )
+
+                // Apple Music
+                tappableIntegrationCard(
+                    icon: "music.note", title: "Apple Music", tint: .red,
+                    isConnected: appleMusicManager.isAuthorized,
+                    isSyncing: appleMusicManager.isAuthorized && appleMusicManager.isSyncing,
+                    summary: appleMusicManager.getSummary(),
+                    tags: vectorManager?.getSourceInsights().first(where: { $0.name == "Apple Music" })?.topTags ?? [],
+                    onConnect: { Task { await appleMusicManager.requestAuthorization() } },
+                    onRefresh: { Task { await appleMusicManager.refreshData() } },
+                    onDisconnect: { appleMusicManager.disconnect() }
+                )
+
+                // Photos
+                tappableIntegrationCard(
+                    icon: "photo.fill", title: "Photos", tint: .orange,
+                    isConnected: photosManager.isEnabled,
+                    isSyncing: photosManager.isEnabled && photosManager.isProcessing,
+                    summary: photosManager.getPlacesSummary(),
+                    tags: vectorManager?.getSourceInsights().first(where: { $0.name == "Photos" })?.topTags ?? [],
+                    onConnect: { connectPhotos() },
+                    onRefresh: { Task { await photosManager.refreshData() } },
+                    onDisconnect: { disconnectPhotos() },
+                    onDonutTap: { showingPhotoPlaces = true }
+                )
+                .sheet(isPresented: $showingPhotoPlaces) {
+                    PhotoPlacesSheet(photosManager: photosManager)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 20)
+        }
+        .background(.regularMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .shadow(color: .blue.opacity(0.08), radius: 12, y: 4)
+    }
+
+    private func integrationPill<T: View>(icon: String, title: String, tint: Color, @ViewBuilder trailing: () -> T) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 38, height: 38)
+                .background(tint.gradient)
+                .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                .shadow(color: tint.opacity(0.3), radius: 4, y: 2)
+
+            Text(title)
+                .font(.subheadline)
+                .fontWeight(.semibold)
+
+            Spacer()
+
+            trailing()
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(Color(UIColor.secondarySystemGroupedBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    /// Integration card where tapping the header triggers connect or shows a menu.
+    private func tappableIntegrationCard(
+        icon: String, title: String, tint: Color,
+        isConnected: Bool, isSyncing: Bool = false,
+        summary: String?, tags: [InterestVectorManager.TagWeight],
+        onConnect: @escaping () -> Void,
+        onRefresh: @escaping () -> Void,
+        onDisconnect: @escaping () -> Void,
+        onDonutTap: (() -> Void)? = nil
+    ) -> some View {
+        VStack(spacing: 0) {
+            // Header row — always visible, never replaced by Menu label
+            HStack(spacing: 12) {
+                Image(systemName: icon)
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 38, height: 38)
+                    .background(tint.gradient)
+                    .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                    .shadow(color: tint.opacity(0.3), radius: 4, y: 2)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.subheadline)
+                        .fontWeight(.semibold)
+                    if let summary, isConnected {
+                        Text(summary)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+
+                Spacer()
+
+                if isSyncing {
+                    ProgressView()
+                        .controlSize(.small)
+                        .frame(width: 28, height: 28)
+                } else if isConnected {
+                    // Checkmark with invisible Menu overlay so it never disappears
+                    ZStack {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(.white)
+                            .frame(width: 28, height: 28)
+                            .background(
+                                LinearGradient(colors: [.green, .mint], startPoint: .topLeading, endPoint: .bottomTrailing)
+                            )
+                            .clipShape(Circle())
+                            .shadow(color: .green.opacity(0.3), radius: 4, y: 2)
+
+                        Menu {
+                            Button { onRefresh() } label: {
+                                Label("Refresh Data", systemImage: "arrow.clockwise")
+                            }
+                            Divider()
+                            Button(role: .destructive) { onDisconnect() } label: {
+                                Label("Disconnect", systemImage: "xmark.circle")
+                            }
+                        } label: {
+                            Color.clear.frame(width: 28, height: 28)
+                        }
+                    }
+                } else {
+                    Button { onConnect() } label: {
+                        Text("Connect")
+                            .font(.caption)
+                            .fontWeight(.bold)
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 8)
+                            .background(
+                                LinearGradient(colors: [.blue, .cyan], startPoint: .leading, endPoint: .trailing)
+                            )
+                            .clipShape(Capsule())
+                            .shadow(color: .blue.opacity(0.25), radius: 4, y: 2)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+
+            // Inline donut chart or skeleton
+            if isConnected && !tags.isEmpty && !isSyncing {
+                Divider()
+                    .padding(.horizontal, 16)
+                if let onDonutTap {
+                    Button { onDonutTap() } label: {
+                        DonutChartView(tags: tags, size: 64, lineWidth: 14)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 12)
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    DonutChartView(tags: tags, size: 64, lineWidth: 14)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 12)
+                }
+            } else if isConnected && isSyncing {
+                Divider()
+                    .padding(.horizontal, 16)
+                DonutSkeletonView()
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+            }
+        }
+        .background(Color(UIColor.secondarySystemGroupedBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    /// Favorites card — plus button to add, tapping header opens favorites list
+    private func favoritesIntegrationCard() -> some View {
+        let tags = vectorManager?.getSourceInsights().first(where: { $0.name == "Favorites" })?.topTags ?? []
+
+        return VStack(spacing: 0) {
+            Button { showingFavorites = true } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: "star.fill")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 38, height: 38)
+                        .background(Color.yellow.gradient)
+                        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                        .shadow(color: .yellow.opacity(0.3), radius: 4, y: 2)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Favorites")
+                            .font(.subheadline)
+                            .fontWeight(.semibold)
+                            .foregroundStyle(.primary)
+                        if !favoritesManager.favorites.isEmpty {
+                            Text("\(favoritesManager.favorites.count) places")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    Spacer()
+
+                    Button { showingPlaceSearch = true } label: {
+                        Image(systemName: "plus")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(.white)
+                            .frame(width: 28, height: 28)
+                            .background(
+                                LinearGradient(colors: [.blue, .cyan], startPoint: .topLeading, endPoint: .bottomTrailing)
+                            )
+                            .clipShape(Circle())
+                            .shadow(color: .blue.opacity(0.3), radius: 4, y: 2)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+            }
+            .buttonStyle(.plain)
+
+            if !tags.isEmpty {
+                Divider()
+                    .padding(.horizontal, 16)
+                DonutChartView(tags: tags, size: 64, lineWidth: 14)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+            }
+        }
+        .background(Color(UIColor.secondarySystemGroupedBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private var syncingBadge: some View {
+        HStack(spacing: 6) {
+            ProgressView()
+                .controlSize(.mini)
+            Text("Syncing")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var interestProfileCard: some View {
+        VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Your Taste")
+                    .font(.title3)
+                    .fontWeight(.bold)
+                Text("What makes you, you")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 20)
+            .padding(.top, 20)
+            .padding(.bottom, 8)
+
+            if let vectorManager = vectorManager {
+                InterestVectorView(vectorManager: vectorManager)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 20)
+            } else {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Building your taste profile...")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(20)
+            }
+        }
+        .background(.regularMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .shadow(color: .purple.opacity(0.08), radius: 12, y: 4)
+    }
+
+    private var visitsCard: some View {
+        VStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Check-ins")
+                    .font(.title3)
+                    .fontWeight(.bold)
+                Text("Places you've visited")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 20)
+            .padding(.top, 20)
+
+            if isLoadingVisits {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Loading visits...")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.bottom, 20)
+            } else if recentVisits.isEmpty && pendingVisitCount == 0 {
+                VStack(spacing: 6) {
+                    Image(systemName: "mappin.and.ellipse")
+                        .font(.title2)
+                        .foregroundStyle(.tertiary)
+                    Text("No visits detected yet")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    Text("Tidepool detects visits when you stay at a place for 5+ minutes")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 20)
+                }
+                .padding(.bottom, 20)
+            } else {
+                VStack(spacing: 8) {
+                    // Pending local visits — chronological, swipe to delete
+                    if pendingVisitCount > 0 {
+                        HStack {
+                            Text("Pending")
+                                .font(.caption)
+                                .fontWeight(.semibold)
+                                .foregroundStyle(.orange)
+                            Spacer()
+                            Button { showingPendingVisits = true } label: {
+                                HStack(spacing: 4) {
+                                    Text("Debug")
+                                        .font(.caption2)
+                                    Image(systemName: "chevron.right")
+                                        .font(.caption2)
+                                }
+                                .foregroundStyle(.tertiary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(.horizontal, 20)
+
+                        ForEach(Array(VisitDetector.shared.pendingVisits.enumerated()), id: \.offset) { i, visit in
+                            pendingVisitRow(visit, index: i)
+                        }
+                    }
+
+                    // Uploaded visits (chronological)
+                    if !recentVisits.isEmpty {
+                        if pendingVisitCount > 0 {
+                            HStack {
+                                Text("History")
+                                    .font(.caption)
+                                    .fontWeight(.semibold)
+                                    .foregroundStyle(.green)
+                                Spacer()
+                            }
+                            .padding(.horizontal, 20)
+                            .padding(.top, 4)
+                        }
+
+                        ForEach(Array(recentVisits.prefix(20).enumerated()), id: \.offset) { i, visit in
+                            uploadedVisitRow(visit, index: i)
+                        }
+
+                        if recentVisits.count > 20 {
+                            Text("+ \(recentVisits.count - 20) more")
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
+                                .padding(.bottom, 4)
+                        }
+                    }
+                }
+                .padding(.bottom, 16)
+            }
+        }
+        .background(.regularMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .shadow(color: .cyan.opacity(0.08), radius: 12, y: 4)
+        .sheet(isPresented: $showingPendingVisits) {
+            PendingVisitsSheet(onDismiss: {
+                showingPendingVisits = false
+                loadVisitData()
+            })
+        }
+        .sheet(isPresented: Binding(
+            get: { selectedVisitIndex != nil },
+            set: { if !$0 { selectedVisitIndex = nil } }
+        )) {
+            if let index = selectedVisitIndex, index < VisitDetector.shared.pendingVisits.count {
+                VisitDetailSheet(
+                    visitIndex: index,
+                    onUpdate: { loadVisitData(); pendingVisitCount = VisitDetector.shared.pendingVisits.count },
+                    onDelete: { selectedVisitIndex = nil; loadVisitData(); pendingVisitCount = VisitDetector.shared.pendingVisits.count }
+                )
+            }
+        }
+    }
+
+    private let visitColors: [Color] = [.cyan, .blue, .teal, .indigo, .purple, .green, .orange, .mint]
+
+    private func pendingVisitRow(_ visit: VisitReport, index: Int) -> some View {
+        let iso = ISO8601DateFormatter()
+        let date = iso.date(from: visit.arrivedAt)
+        let timeStr = date.map { RelativeDateTimeFormatter().localizedString(for: $0, relativeTo: Date()) } ?? visit.arrivedAt
+
+        return Button {
+            selectedVisitIndex = index
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "clock.arrow.circlepath")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 34, height: 34)
+                    .background(Color.orange.gradient)
+                    .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(visit.name)
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+
+                    HStack(spacing: 6) {
+                        Text("\(visit.durationMinutes)m")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text(timeStr)
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+
+                Spacer()
+
+                Image(systemName: "chevron.right")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 6)
+    }
+
+    @State private var selectedUploadedVisit: VisitReport? = nil
+
+    private func uploadedVisitRow(_ visit: VisitReport, index: Int) -> some View {
+        let color = visitColors[index % visitColors.count]
+        let iso = ISO8601DateFormatter()
+        let date = iso.date(from: visit.arrivedAt)
+        let timeStr = date.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? visit.arrivedAt
+        let categoryIcon = (PlaceCategory(rawValue: visit.category.rawValue) ?? .other).iconName
+
+        return Button {
+            selectedUploadedVisit = visit
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: categoryIcon)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 34, height: 34)
+                    .background(color.gradient)
+                    .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(visit.name)
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+
+                    HStack(spacing: 6) {
+                        Text("\(visit.durationMinutes)m")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text(timeStr)
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+
+                Spacer()
+
+                Image(systemName: "chevron.right")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 6)
+        .sheet(isPresented: Binding(
+            get: { selectedUploadedVisit?.arrivedAt == visit.arrivedAt },
+            set: { if !$0 { selectedUploadedVisit = nil } }
+        )) {
+            UploadedVisitDetailSheet(visit: visit)
+        }
+    }
+
+    private func visitPatternRow(_ pattern: VisitPattern, index: Int) -> some View {
+        let color = visitColors[index % visitColors.count]
+        let categoryIcon = (PlaceCategory(rawValue: pattern.category.rawValue) ?? .other).iconName
+
+        return HStack(spacing: 12) {
+            Image(systemName: categoryIcon)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 34, height: 34)
+                .background(color.gradient)
+                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(pattern.name)
+                    .font(.subheadline)
+                    .fontWeight(.medium)
+                    .lineLimit(1)
+
+                HStack(spacing: 6) {
+                    Text("\(pattern.visitCount) visit\(pattern.visitCount == 1 ? "" : "s")")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    if !pattern.typicalHours.isEmpty {
+                        let hourStr = pattern.typicalHours.prefix(2)
+                            .map { formatHour($0) }
+                            .joined(separator: ", ")
+                        Text("around \(hourStr)")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+            }
+
+            Spacer()
+
+            Text("\(pattern.avgDurationMinutes)m")
+                .font(.caption)
+                .fontWeight(.semibold)
+                .foregroundStyle(color)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 6)
+    }
+
+    private func formatHour(_ hour: Int) -> String {
+        let h = hour % 12 == 0 ? 12 : hour % 12
+        let ampm = hour < 12 ? "am" : "pm"
+        return "\(h)\(ampm)"
+    }
+
+    private var favoritesCard: some View {
+        VStack(spacing: 12) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Favorites")
+                        .font(.title3)
+                        .fontWeight(.bold)
+                    Text("Places you love")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+
+                Button { showingPlaceSearch = true } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 32, height: 32)
+                        .background(
+                            LinearGradient(colors: [.pink, .orange], startPoint: .topLeading, endPoint: .bottomTrailing)
+                        )
+                        .clipShape(Circle())
+                        .shadow(color: .pink.opacity(0.3), radius: 4, y: 2)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 20)
+
+            let stats = favoritesManager.getStats()
+            if stats.totalFavorites > 0 {
+                Button { showingFavorites = true } label: {
+                    HStack(spacing: 16) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("\(stats.totalFavorites) saved places")
+                                .font(.subheadline)
+                                .fontWeight(.medium)
+                                .foregroundStyle(.primary)
+
+                            if let top = stats.topCategory {
+                                Text("Most loved: \(top.displayName)")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+
+                        Spacer()
+
+                        if stats.averageRating > 0 {
+                            HStack(spacing: 3) {
+                                Image(systemName: "star.fill")
+                                    .foregroundStyle(.yellow)
+                                Text(String(format: "%.1f", stats.averageRating))
+                                    .fontWeight(.semibold)
+                            }
+                            .font(.subheadline)
+                        }
+
+                        Image(systemName: "chevron.right")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
+                    .padding(16)
+                    .background(Color(UIColor.secondarySystemGroupedBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 16)
+            } else {
+                Text("Add places you love to build your taste profile")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 20)
+            }
+
+            Spacer().frame(height: 8)
+        }
+        .background(.regularMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .shadow(color: .orange.opacity(0.08), radius: 12, y: 4)
+    }
+
+    private var locationCard: some View {
+        VStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Location")
+                    .font(.title3)
+                    .fontWeight(.bold)
+                Text("How Tidepool sees the world around you")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 20)
+            .padding(.top, 20)
+
+            VStack(spacing: 8) {
+                locationSettingRow(icon: "location.fill", title: "Permission", tint: .blue) {
+                    HStack(spacing: 6) {
+                        Button("When In Use") { location.requestAuthorization() }
+                            .font(.caption2)
+                            .fontWeight(.semibold)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(Color.blue.opacity(0.12))
+                            .clipShape(Capsule())
+                        Button("Always") { location.requestAlwaysAuthorization() }
+                            .font(.caption2)
+                            .fontWeight(.semibold)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(Color.blue.opacity(0.12))
+                            .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.blue)
+                }
+
+                locationToggleRow(icon: "waveform.path.ecg", title: "Background updates", tint: .purple, isOn: $backgroundEnabled)
+
+                locationToggleRow(icon: "bolt.slash.fill", title: "Reduced accuracy", tint: .yellow, isOn: $reducedAccuracy)
+
+                Button { showingHomePicker = true } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: "house.fill")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 32, height: 32)
+                            .background(Color.orange.gradient)
+                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Home")
+                                .font(.subheadline)
+                                .foregroundStyle(.primary)
+                            if !homeAddress.isEmpty {
+                                Text(homeAddress)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                        }
+
+                        Spacer()
+
+                        Image(systemName: location.homeLocation == nil ? "plus" : "pencil")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(.white)
+                            .frame(width: 28, height: 28)
+                            .background(LinearGradient(colors: [.blue, .cyan], startPoint: .topLeading, endPoint: .bottomTrailing))
+                            .clipShape(Circle())
+                            .shadow(color: .blue.opacity(0.3), radius: 4, y: 2)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(Color(UIColor.secondarySystemGroupedBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                }
+                .buttonStyle(.plain)
+
+                // Hidden places
+                hiddenPlacesSection
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 20)
+        }
+        .background(.regularMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .shadow(color: .indigo.opacity(0.06), radius: 12, y: 4)
+    }
+
+    // MARK: - Hidden Places
+
+    private var hiddenPlaces: [HiddenPlace] {
+        (try? JSONDecoder().decode([HiddenPlace].self, from: hiddenPlacesData)) ?? []
+    }
+
+    private func saveHiddenPlaces(_ places: [HiddenPlace]) {
+        hiddenPlacesData = (try? JSONEncoder().encode(places)) ?? Data()
+    }
+
+    private var hiddenPlacesSection: some View {
+        VStack(spacing: 8) {
+            ForEach(hiddenPlaces) { place in
+                HStack(spacing: 12) {
+                    Image(systemName: "eye.slash.fill")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 32, height: 32)
+                        .background(Color.purple.gradient)
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(place.name)
+                            .font(.subheadline)
+                            .fontWeight(.medium)
+                        Text(place.address)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+
+                    Spacer()
+
+                    Button {
+                        var places = hiddenPlaces
+                        places.removeAll { $0.id == place.id }
+                        saveHiddenPlaces(places)
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.caption2)
+                            .fontWeight(.bold)
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(Color(UIColor.secondarySystemGroupedBackground))
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            }
+
+            Button { showingAddHiddenPlace = true } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: "eye.slash.fill")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 32, height: 32)
+                        .background(Color.purple.gradient)
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+                    Text("Add hidden place")
+                        .font(.subheadline)
+
+                    Spacer()
+
+                    Image(systemName: "plus")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 28, height: 28)
+                        .background(LinearGradient(colors: [.blue, .cyan], startPoint: .topLeading, endPoint: .bottomTrailing))
+                        .clipShape(Circle())
+                        .shadow(color: .blue.opacity(0.3), radius: 4, y: 2)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(Color(UIColor.secondarySystemGroupedBackground))
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            }
+            .buttonStyle(.plain)
+        }
+        .sheet(isPresented: $showingAddHiddenPlace) {
+            HiddenPlacePicker { place in
+                var places = hiddenPlaces
+                places.append(place)
+                saveHiddenPlaces(places)
+                showingAddHiddenPlace = false
+            }
+            .presentationDetents([.large])
+        }
+    }
+
+    private func locationSettingRow<T: View>(icon: String, title: String, tint: Color, @ViewBuilder trailing: () -> T) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 32, height: 32)
+                .background(tint.gradient)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+            Text(title)
+                .font(.subheadline)
+
+            Spacer()
+
+            trailing()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(Color(UIColor.secondarySystemGroupedBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    private func locationToggleRow(icon: String, title: String, tint: Color, isOn: Binding<Bool>) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 32, height: 32)
+                .background(tint.gradient)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+            Text(title)
+                .font(.subheadline)
+
+            Spacer()
+
+            Toggle("", isOn: isOn)
+                .labelsHidden()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 6)
+        .background(Color(UIColor.secondarySystemGroupedBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    private var privacyCard: some View {
+        VStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Privacy")
+                    .font(.title3)
+                    .fontWeight(.bold)
+                Text("Your data stays yours")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 20)
+            .padding(.top, 20)
+
+            VStack(spacing: 8) {
+                privacyBadge(
+                    icon: "shield.lefthalf.filled",
+                    tint: .green,
+                    title: "Fully anonymous",
+                    subtitle: "No accounts, no identity, no tracking"
+                )
+                privacyBadge(
+                    icon: "eye.slash.fill",
+                    tint: .blue,
+                    title: "Home protected",
+                    subtitle: "Presence hidden within 500 ft of home"
+                )
+                privacyBadge(
+                    icon: "lock.fill",
+                    tint: .purple,
+                    title: "Encrypted in transit",
+                    subtitle: "All data encrypted between device and server"
+                )
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 20)
+        }
+        .background(.regularMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .shadow(color: .green.opacity(0.06), radius: 12, y: 4)
+    }
+
+    private func privacyBadge(icon: String, tint: Color, title: String, subtitle: String) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 32, height: 32)
+                .background(tint.gradient)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.subheadline)
+                    .fontWeight(.medium)
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(Color(UIColor.secondarySystemGroupedBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
     // MARK: - Actions
 
     private func connectPhotos() {
@@ -555,39 +1602,179 @@ struct ProfileView: View {
 
 struct SimpleHomePicker: View {
     @Environment(\.dismiss) private var dismiss
-    @State private var centerCoordinate: CLLocationCoordinate2D
-    let onSelect: (CLLocationCoordinate2D) -> Void
+    @StateObject private var searchCompleter = PlaceSearchCompleter()
+    @State private var searchText = ""
+    @State private var selectedCoordinate: CLLocationCoordinate2D?
+    @State private var selectedAddress: String?
+    @State private var suppressNextChange = false
+    @FocusState private var isFieldFocused: Bool
+    let current: CLLocationCoordinate2D?
+    let currentAddress: String?
+    let onSelect: (CLLocationCoordinate2D, String) -> Void
 
-    init(current: CLLocationCoordinate2D?, onSelect: @escaping (CLLocationCoordinate2D) -> Void) {
+    init(current: CLLocationCoordinate2D?, currentAddress: String? = nil, onSelect: @escaping (CLLocationCoordinate2D, String) -> Void) {
+        self.current = current
+        self.currentAddress = currentAddress
         self.onSelect = onSelect
-        _centerCoordinate = State(initialValue: current ?? CLLocationCoordinate2D(latitude: 37.7749, longitude: -122.4194))
     }
 
     var body: some View {
-        let initialRegion = MKCoordinateRegion(
-            center: centerCoordinate,
-            span: MKCoordinateSpan(latitudeDelta: 0.01, longitudeDelta: 0.01)
-        )
-        return VStack(spacing: 0) {
-            HomePickerMapRepresentable(centerCoordinate: $centerCoordinate, initialRegion: initialRegion)
-                .overlay(alignment: .center) {
-                    Image(systemName: "house.fill")
-                        .font(.title)
-                        .foregroundColor(.red)
-                        .shadow(radius: 3)
-                }
-                .ignoresSafeArea()
+        VStack(spacing: 0) {
+            // Header
             HStack {
                 Button("Cancel") { dismiss() }
+                    .foregroundStyle(.secondary)
                 Spacer()
-                Button("Set Home Here") {
-                    onSelect(centerCoordinate)
-                    dismiss()
+                Text("Set Home")
+                    .font(.headline)
+                Spacer()
+                Button("Save") {
+                    if let coord = selectedCoordinate, let addr = selectedAddress {
+                        onSelect(coord, addr)
+                        dismiss()
+                    }
                 }
-                .buttonStyle(.borderedProminent)
+                .fontWeight(.semibold)
+                .disabled(selectedCoordinate == nil)
             }
             .padding()
-            .background(.ultraThinMaterial)
+
+            Divider()
+
+            // Search bar
+            HStack(spacing: 10) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(.secondary)
+
+                TextField("Enter your home address...", text: $searchText)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 16, weight: .medium))
+                    .focused($isFieldFocused)
+
+                if !searchText.isEmpty {
+                    Button {
+                        searchText = ""
+                        selectedCoordinate = nil
+                        selectedAddress = nil
+                        searchCompleter.clear()
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.tertiary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 12)
+            .background(Color(UIColor.tertiarySystemFill))
+            .clipShape(Capsule())
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+
+            // Selected address confirmation
+            if let address = selectedAddress {
+                HStack(spacing: 12) {
+                    Image(systemName: "house.fill")
+                        .font(.title2)
+                        .foregroundStyle(.blue)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(address)
+                            .font(.subheadline)
+                            .fontWeight(.medium)
+                        Text("Your presence will be hidden within 500 ft of this location")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(16)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.blue.opacity(0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .padding(.horizontal, 16)
+                .padding(.top, 12)
+            }
+
+            // Suggestions
+            if !searchCompleter.suggestions.isEmpty && selectedAddress == nil {
+                List {
+                    ForEach(searchCompleter.suggestions, id: \.self) { suggestion in
+                        Button {
+                            resolveAndSelect(suggestion)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(suggestion.title)
+                                    .font(.subheadline)
+                                    .fontWeight(.medium)
+                                if !suggestion.subtitle.isEmpty {
+                                    Text(suggestion.subtitle)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .listStyle(.plain)
+            } else if selectedAddress == nil {
+                Spacer()
+                VStack(spacing: 8) {
+                    Image(systemName: "house")
+                        .font(.largeTitle)
+                        .foregroundStyle(.quaternary)
+                    if let current {
+                        Text("Home is currently set")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                        if let addr = currentAddress, !addr.isEmpty {
+                            Text(addr)
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
+                        }
+                    } else {
+                        Text("Search for your home address")
+                            .font(.subheadline)
+                            .foregroundStyle(.quaternary)
+                    }
+                }
+                Spacer()
+            } else {
+                Spacer()
+            }
+        }
+        .fontDesign(.rounded)
+        .onAppear {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                isFieldFocused = true
+            }
+        }
+        .onChange(of: searchText) { _, newValue in
+            if suppressNextChange {
+                suppressNextChange = false
+                return
+            }
+            selectedCoordinate = nil
+            selectedAddress = nil
+            searchCompleter.search(newValue)
+        }
+    }
+
+    private func resolveAndSelect(_ suggestion: MKLocalSearchCompletion) {
+        isFieldFocused = false
+        searchCompleter.clear()
+        let request = MKLocalSearch.Request(completion: suggestion)
+        MKLocalSearch(request: request).start { response, _ in
+            if let item = response?.mapItems.first,
+               let location = item.placemark.location {
+                selectedCoordinate = location.coordinate
+                // Short address: just the street portion
+                let shortAddress = suggestion.title
+                selectedAddress = shortAddress
+                suppressNextChange = true
+                searchText = shortAddress
+            }
         }
     }
 }
@@ -598,16 +1785,19 @@ struct ProfileSheetsModifier: ViewModifier {
     @Binding var showingHomePicker: Bool
     @Binding var showingLocationImport: Bool
     @Binding var showingFavorites: Bool
+    @Binding var showingPlaceSearch: Bool
     @Binding var photosDeniedAlert: Bool
     let location: LocationManager
     let appleMapsManager: AppleMapsIntegrationManager
     let favoritesManager: InAppFavoritesManager
+    var onHomeSet: ((CLLocationCoordinate2D, String) -> Void)?
 
     func body(content: Content) -> some View {
         content
             .sheet(isPresented: $showingHomePicker) {
-                SimpleHomePicker(current: location.homeLocation) { coord in
+                SimpleHomePicker(current: location.homeLocation, currentAddress: UserDefaults.standard.string(forKey: "home_address")) { coord, address in
                     location.setHome(to: coord)
+                    onHomeSet?(coord, address)
                 }
             }
             .sheet(isPresented: $showingLocationImport) {
@@ -615,6 +1805,10 @@ struct ProfileSheetsModifier: ViewModifier {
             }
             .sheet(isPresented: $showingFavorites) {
                 FavoritesListView(favoritesManager: favoritesManager)
+            }
+            .sheet(isPresented: $showingPlaceSearch) {
+                PlaceSearchView()
+                    .environmentObject(favoritesManager)
             }
             .alert("Photos Access Required", isPresented: $photosDeniedAlert) {
                 Button("Cancel", role: .cancel) {}
@@ -686,6 +1880,833 @@ struct BirthdayPickerSheet: View {
     }
 }
 
+// MARK: - Pending Visits Debug Sheet
+
+struct PendingVisitsSheet: View {
+    let onDismiss: () -> Void
+    private let detector = VisitDetector.shared
+    private let iso = ISO8601DateFormatter()
+
+    var body: some View {
+        NavigationView {
+            List {
+                // Status section
+                Section("Upload Status") {
+                    if let lastDate = detector.lastUploadDate {
+                        HStack {
+                            Label("Last upload", systemImage: "checkmark.circle.fill")
+                                .foregroundStyle(.green)
+                            Spacer()
+                            Text(lastDate, style: .relative)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    if let error = detector.lastUploadError {
+                        HStack {
+                            Label("Last error", systemImage: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.red)
+                            Spacer()
+                            Text(error)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                        }
+                    }
+
+                    Button {
+                        detector.retryUpload()
+                    } label: {
+                        Label("Retry Upload Now", systemImage: "arrow.clockwise")
+                    }
+
+                    Button(role: .destructive) {
+                        detector.clearPending()
+                        onDismiss()
+                    } label: {
+                        Label("Clear Queue", systemImage: "trash")
+                    }
+                }
+
+                // Pending visits
+                Section("Pending Visits (\(detector.pendingVisits.count))") {
+                    if detector.pendingVisits.isEmpty {
+                        Text("Queue is empty")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(Array(detector.pendingVisits.enumerated()), id: \.offset) { _, visit in
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack {
+                                    Text(visit.name)
+                                        .font(.subheadline)
+                                        .fontWeight(.medium)
+                                    Spacer()
+                                    Text(visit.source)
+                                        .font(.caption2)
+                                        .fontWeight(.semibold)
+                                        .foregroundStyle(.white)
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(visit.source == "visit" ? Color.blue : (visit.source == "photo" ? Color.orange : Color.yellow))
+                                        .clipShape(Capsule())
+                                }
+
+                                HStack(spacing: 12) {
+                                    Label(visit.category.rawValue, systemImage: "tag")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+
+                                    Label(String(format: "%.4f, %.4f", visit.latitude, visit.longitude), systemImage: "location")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+
+                                HStack(spacing: 12) {
+                                    Label("\(visit.durationMinutes)m", systemImage: "clock")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+
+                                    Label("confidence: \(String(format: "%.0f%%", visit.confidence * 100))", systemImage: "gauge.medium")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+
+                                if let poiId = visit.poiId {
+                                    Text("POI: \(poiId)")
+                                        .font(.caption2)
+                                        .foregroundStyle(.tertiary)
+                                        .lineLimit(1)
+                                }
+
+                                if let yelpId = visit.yelpId {
+                                    Text("Yelp: \(yelpId)")
+                                        .font(.caption2)
+                                        .foregroundStyle(.tertiary)
+                                }
+
+                                Text(visit.arrivedAt)
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
+                            }
+                            .padding(.vertical, 4)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Upload Queue")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { onDismiss() }
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Photo Places Sheet
+
+struct MergedPhotoPlace: Identifiable {
+    let id = UUID()
+    let name: String
+    let category: PlaceCategory
+    var photoCount: Int
+    var firstVisit: Date
+    var lastVisit: Date
+    var clusterCount: Int
+}
+
+struct PhotoPlacesSheet: View {
+    @ObservedObject var photosManager: PhotosIntegrationManager
+    @Environment(\.dismiss) private var dismiss
+
+    private var nonHome: [PhotoLocationCluster] {
+        let filtered = photosManager.clusters.filter { $0.category != .home }
+        let exclusionRadius: Double = 152.4
+        var exclusionPoints: [CLLocation] = []
+
+        if let data = UserDefaults.standard.data(forKey: "home_location"),
+           let coords = try? JSONDecoder().decode([Double].self, from: data), coords.count == 2 {
+            exclusionPoints.append(CLLocation(latitude: coords[0], longitude: coords[1]))
+        }
+        if let data = UserDefaults.standard.data(forKey: "hidden_places_data"),
+           let places = try? JSONDecoder().decode([HiddenPlace].self, from: data) {
+            for place in places {
+                exclusionPoints.append(CLLocation(latitude: place.latitude, longitude: place.longitude))
+            }
+        }
+
+        guard !exclusionPoints.isEmpty else { return filtered }
+        return filtered.filter { cluster in
+            let loc = CLLocation(latitude: cluster.centerCoordinate.latitude, longitude: cluster.centerCoordinate.longitude)
+            return !exclusionPoints.contains { $0.distance(from: loc) < exclusionRadius }
+        }
+    }
+
+    private var matchedRaw: [PhotoLocationCluster] {
+        nonHome.filter { InterestVectorManager.isLegitPlaceName($0) }
+    }
+
+    /// Merged matched places — deduped by name, summing photo counts and widening date ranges
+    private var matched: [MergedPhotoPlace] {
+        var byName: [String: MergedPhotoPlace] = [:]
+        for cluster in matchedRaw {
+            let name = cluster.inferredName ?? ""
+            if var existing = byName[name] {
+                existing.photoCount += cluster.photoCount
+                existing.firstVisit = min(existing.firstVisit, cluster.firstVisit)
+                existing.lastVisit = max(existing.lastVisit, cluster.lastVisit)
+                existing.clusterCount += 1
+                byName[name] = existing
+            } else {
+                byName[name] = MergedPhotoPlace(
+                    name: name,
+                    category: cluster.category,
+                    photoCount: cluster.photoCount,
+                    firstVisit: cluster.firstVisit,
+                    lastVisit: cluster.lastVisit,
+                    clusterCount: 1
+                )
+            }
+        }
+        return byName.values.sorted { $0.photoCount > $1.photoCount }
+    }
+
+    private var unmatchedCount: Int {
+        nonHome.count - matchedRaw.count
+    }
+
+    private var tags: [InterestVectorManager.TagWeight] {
+        let total = Float(nonHome.count)
+        guard total > 0 else { return [] }
+        var results: [InterestVectorManager.TagWeight] = []
+        if !matchedRaw.isEmpty {
+            results.append(.init(tag: "\(matched.count) places found", weight: Float(matchedRaw.count) / total))
+        }
+        if unmatchedCount > 0 {
+            results.append(.init(tag: "\(unmatchedCount) no match", weight: Float(unmatchedCount) / total))
+        }
+        return results
+    }
+
+    var body: some View {
+        NavigationView {
+            ScrollView {
+                VStack(spacing: 20) {
+                    // Donut at top
+                    if !tags.isEmpty {
+                        DonutChartView(tags: tags, size: 80, lineWidth: 18)
+                            .padding(20)
+                            .background(.regularMaterial)
+                            .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                    }
+
+                    // Stats
+                    HStack(spacing: 0) {
+                        statBubble(value: "\(photosManager.metrics?.totalPhotos ?? UserDefaults.standard.integer(forKey: "photos_total_count"))", label: "Photos scanned", color: .orange)
+                        statBubble(value: "\(nonHome.count)", label: "Locations", color: .blue)
+                        statBubble(value: "\(matched.count)", label: "Places found", color: .green)
+                    }
+                    .padding(16)
+                    .background(.regularMaterial)
+                    .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+
+                    // Matched places list
+                    if !matched.isEmpty {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Places Found")
+                                .font(.headline)
+                                .padding(.horizontal, 4)
+
+                            ForEach(matched) { place in
+                                HStack(spacing: 12) {
+                                    Image(systemName: place.category.iconName)
+                                        .font(.system(size: 14, weight: .semibold))
+                                        .foregroundStyle(.white)
+                                        .frame(width: 34, height: 34)
+                                        .background(Color.green.gradient)
+                                        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(place.name)
+                                            .font(.subheadline)
+                                            .fontWeight(.medium)
+                                            .lineLimit(1)
+
+                                        HStack(spacing: 8) {
+                                            Text(place.category.displayName)
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                            Text("\(place.photoCount) photos")
+                                                .font(.caption)
+                                                .foregroundStyle(.tertiary)
+                                        }
+                                    }
+
+                                    Spacer()
+
+                                    VStack(alignment: .trailing, spacing: 2) {
+                                        Text(place.firstVisit, style: .date)
+                                            .font(.caption2)
+                                            .foregroundStyle(.tertiary)
+                                        if place.lastVisit.timeIntervalSince(place.firstVisit) > 86400 {
+                                            Text(place.lastVisit, style: .date)
+                                                .font(.caption2)
+                                                .foregroundStyle(.tertiary)
+                                        }
+                                    }
+                                }
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 10)
+                                .background(Color(UIColor.secondarySystemGroupedBackground))
+                                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            }
+                        }
+                        .padding(16)
+                        .background(.regularMaterial)
+                        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                    }
+
+                    // Unmatched summary
+                    if unmatchedCount > 0 {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Unmatched Locations")
+                                .font(.headline)
+                                .padding(.horizontal, 4)
+
+                            Text("\(unmatchedCount) photo locations couldn't be matched to a known place. These are typically residential areas, streets, or locations without a named business nearby.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 4)
+                        }
+                        .padding(16)
+                        .background(.regularMaterial)
+                        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 8)
+                .padding(.bottom, 32)
+            }
+            .background(Color(UIColor.systemGroupedBackground))
+            .navigationTitle("Photo Places")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+    }
+
+    private func statBubble(value: String, label: String, color: Color) -> some View {
+        VStack(spacing: 4) {
+            Text(value)
+                .font(.headline)
+                .fontWeight(.bold)
+                .foregroundStyle(color)
+            Text(label)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+    }
+}
+
+// MARK: - Uploaded Visit Detail Sheet
+
+struct UploadedVisitDetailSheet: View {
+    let visit: VisitReport
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationView {
+            ScrollView {
+                VStack(spacing: 16) {
+                    // Mini map
+                    Map(initialPosition: .region(MKCoordinateRegion(
+                        center: CLLocationCoordinate2D(latitude: visit.latitude, longitude: visit.longitude),
+                        span: MKCoordinateSpan(latitudeDelta: 0.003, longitudeDelta: 0.003)
+                    ))) {
+                        Marker(visit.name, coordinate: CLLocationCoordinate2D(latitude: visit.latitude, longitude: visit.longitude))
+                            .tint(.green)
+                    }
+                    .frame(height: 200)
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+
+                    // Info card
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Text(visit.name)
+                                .font(.title3)
+                                .fontWeight(.bold)
+                            Spacer()
+                            Text("Synced")
+                                .font(.caption2)
+                                .fontWeight(.semibold)
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
+                                .background(Color.green)
+                                .clipShape(Capsule())
+                        }
+
+                        HStack(spacing: 16) {
+                            Label(visit.category.rawValue, systemImage: "tag")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                            Label("\(visit.durationMinutes) min", systemImage: "clock")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        let iso = ISO8601DateFormatter()
+                        if let date = iso.date(from: visit.arrivedAt) {
+                            Label(date.formatted(date: .abbreviated, time: .shortened), systemImage: "calendar")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Label(String(format: "%.5f, %.5f", visit.latitude, visit.longitude), systemImage: "location")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
+                    .padding(16)
+                    .background(.regularMaterial)
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                }
+                .padding(16)
+            }
+            .background(Color(UIColor.systemGroupedBackground))
+            .navigationTitle("Check-in Detail")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Visit Detail Sheet
+
+struct VisitDetailSheet: View {
+    let visitIndex: Int
+    let onUpdate: () -> Void
+    let onDelete: () -> Void
+    @Environment(\.dismiss) private var dismiss
+    @StateObject private var searchCompleter = PlaceSearchCompleter()
+    @State private var searchText = ""
+    @State private var showingRelink = false
+    @State private var suppressNextChange = false
+
+    private var visit: VisitReport? {
+        guard visitIndex < VisitDetector.shared.pendingVisits.count else { return nil }
+        return VisitDetector.shared.pendingVisits[visitIndex]
+    }
+
+    var body: some View {
+        NavigationView {
+            ScrollView {
+                if let visit {
+                    VStack(spacing: 16) {
+                        // Mini map
+                        Map(initialPosition: .region(MKCoordinateRegion(
+                            center: CLLocationCoordinate2D(latitude: visit.latitude, longitude: visit.longitude),
+                            span: MKCoordinateSpan(latitudeDelta: 0.003, longitudeDelta: 0.003)
+                        ))) {
+                            Marker(visit.name, coordinate: CLLocationCoordinate2D(latitude: visit.latitude, longitude: visit.longitude))
+                                .tint(.orange)
+                        }
+                        .frame(height: 200)
+                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+
+                        // Info card
+                        VStack(alignment: .leading, spacing: 12) {
+                            HStack {
+                                Text(visit.name)
+                                    .font(.title3)
+                                    .fontWeight(.bold)
+                                Spacer()
+                                Text(visit.source)
+                                    .font(.caption2)
+                                    .fontWeight(.semibold)
+                                    .foregroundStyle(.white)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 3)
+                                    .background(visit.source == "visit" ? Color.blue : Color.orange)
+                                    .clipShape(Capsule())
+                            }
+
+                            HStack(spacing: 16) {
+                                Label(visit.category.rawValue, systemImage: "tag")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                                Label("\(visit.durationMinutes) min", systemImage: "clock")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            let iso = ISO8601DateFormatter()
+                            if let date = iso.date(from: visit.arrivedAt) {
+                                Label(date.formatted(date: .abbreviated, time: .shortened), systemImage: "calendar")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            Label(String(format: "%.5f, %.5f", visit.latitude, visit.longitude), systemImage: "location")
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
+
+                            Label("Confidence: \(Int(visit.confidence * 100))%", systemImage: "gauge.medium")
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
+                        }
+                        .padding(16)
+                        .background(.regularMaterial)
+                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+
+                        // Re-link button
+                        Button { showingRelink = true } label: {
+                            HStack {
+                                Image(systemName: "arrow.triangle.2.circlepath")
+                                    .font(.subheadline)
+                                Text("Link to different place")
+                                    .font(.subheadline)
+                                    .fontWeight(.medium)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 14)
+                            .background(Color.blue.opacity(0.1))
+                            .foregroundStyle(.blue)
+                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+
+                        // Delete button
+                        Button {
+                            VisitDetector.shared.removeVisit(at: visitIndex)
+                            onDelete()
+                        } label: {
+                            HStack {
+                                Image(systemName: "trash")
+                                    .font(.subheadline)
+                                Text("Delete check-in")
+                                    .font(.subheadline)
+                                    .fontWeight(.medium)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 14)
+                            .background(Color.red.opacity(0.1))
+                            .foregroundStyle(.red)
+                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(16)
+                }
+            }
+            .background(Color(UIColor.systemGroupedBackground))
+            .navigationTitle("Check-in Detail")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
+                }
+            }
+            .sheet(isPresented: $showingRelink) {
+                relinkSheet
+            }
+        }
+    }
+
+    private var relinkSheet: some View {
+        NavigationView {
+            VStack(spacing: 0) {
+                HStack(spacing: 10) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    TextField("Search for the correct place...", text: $searchText)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 16, weight: .medium))
+                }
+                .padding(.horizontal, 18)
+                .padding(.vertical, 12)
+                .background(Color(UIColor.tertiarySystemFill))
+                .clipShape(Capsule())
+                .padding(.horizontal, 16)
+                .padding(.top, 16)
+
+                if !searchCompleter.suggestions.isEmpty {
+                    List {
+                        ForEach(searchCompleter.suggestions, id: \.self) { suggestion in
+                            Button {
+                                relinkToSuggestion(suggestion)
+                            } label: {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(suggestion.title)
+                                        .font(.subheadline)
+                                        .fontWeight(.medium)
+                                    if !suggestion.subtitle.isEmpty {
+                                        Text(suggestion.subtitle)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .listStyle(.plain)
+                } else {
+                    Spacer()
+                    Text("Search for the place you actually visited")
+                        .font(.subheadline)
+                        .foregroundStyle(.quaternary)
+                    Spacer()
+                }
+            }
+            .fontDesign(.rounded)
+            .navigationTitle("Re-link Place")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Cancel") { showingRelink = false }
+                }
+            }
+            .onChange(of: searchText) { _, newValue in
+                if suppressNextChange { suppressNextChange = false; return }
+                searchCompleter.search(newValue)
+            }
+            .onAppear {
+                if let visit {
+                    searchCompleter.updateRegion(MKCoordinateRegion(
+                        center: CLLocationCoordinate2D(latitude: visit.latitude, longitude: visit.longitude),
+                        latitudinalMeters: 2000, longitudinalMeters: 2000
+                    ))
+                }
+            }
+        }
+    }
+
+    private func relinkToSuggestion(_ suggestion: MKLocalSearchCompletion) {
+        guard let visit else { return }
+
+        let request = MKLocalSearch.Request(completion: suggestion)
+        MKLocalSearch(request: request).start { response, _ in
+            guard let item = response?.mapItems.first else { return }
+
+            let newName = item.name ?? suggestion.title
+            let newCoord = item.placemark.location?.coordinate ?? CLLocationCoordinate2D(latitude: visit.latitude, longitude: visit.longitude)
+            let newCategory = PlaceCategory.from(mapItem: item)
+
+            let updated = VisitReport(
+                poiId: FavoriteLocation.stablePlaceId(name: newName, coordinate: newCoord),
+                yelpId: visit.yelpId,
+                name: newName,
+                category: TidepoolShared.PlaceCategory(rawValue: newCategory.rawValue) ?? .other,
+                latitude: newCoord.latitude,
+                longitude: newCoord.longitude,
+                arrivedAt: visit.arrivedAt,
+                departedAt: visit.departedAt,
+                dayOfWeek: visit.dayOfWeek,
+                hourOfDay: visit.hourOfDay,
+                durationMinutes: visit.durationMinutes,
+                confidence: 1.0,
+                source: visit.source
+            )
+
+            VisitDetector.shared.updateVisit(at: visitIndex, with: updated)
+            onUpdate()
+            showingRelink = false
+        }
+    }
+}
+
+// MARK: - Hidden Place Model
+
+struct HiddenPlace: Identifiable, Codable {
+    let id: UUID
+    let name: String
+    let address: String
+    let latitude: Double
+    let longitude: Double
+
+    init(name: String, address: String, latitude: Double, longitude: Double) {
+        self.id = UUID()
+        self.name = name
+        self.address = address
+        self.latitude = latitude
+        self.longitude = longitude
+    }
+}
+
+// MARK: - Hidden Place Picker
+
+struct HiddenPlacePicker: View {
+    @Environment(\.dismiss) private var dismiss
+    @StateObject private var searchCompleter = PlaceSearchCompleter()
+    @State private var searchText = ""
+    @State private var placeName = ""
+    @State private var selectedCoordinate: CLLocationCoordinate2D?
+    @State private var selectedAddress: String?
+    @State private var suppressNextChange = false
+    @FocusState private var isNameFocused: Bool
+    @FocusState private var isAddressFocused: Bool
+    let onSave: (HiddenPlace) -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack {
+                Button("Cancel") { dismiss() }
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text("Add Hidden Place")
+                    .font(.headline)
+                Spacer()
+                Button("Save") {
+                    if let coord = selectedCoordinate, let addr = selectedAddress, !placeName.isEmpty {
+                        onSave(HiddenPlace(name: placeName, address: addr, latitude: coord.latitude, longitude: coord.longitude))
+                    }
+                }
+                .fontWeight(.semibold)
+                .disabled(selectedCoordinate == nil || placeName.isEmpty)
+            }
+            .padding()
+
+            Divider()
+
+            VStack(spacing: 12) {
+                // Name field
+                HStack(spacing: 10) {
+                    Image(systemName: "tag.fill")
+                        .font(.system(size: 14))
+                        .foregroundStyle(.secondary)
+                    TextField("Name (e.g. Work, Gym)", text: $placeName)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 16, weight: .medium))
+                        .focused($isNameFocused)
+                }
+                .padding(.horizontal, 18)
+                .padding(.vertical, 12)
+                .background(Color(UIColor.tertiarySystemFill))
+                .clipShape(Capsule())
+
+                // Address search
+                HStack(spacing: 10) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 14))
+                        .foregroundStyle(.secondary)
+                    TextField("Search address...", text: $searchText)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 16, weight: .medium))
+                        .focused($isAddressFocused)
+
+                    if !searchText.isEmpty {
+                        Button {
+                            searchText = ""
+                            selectedCoordinate = nil
+                            selectedAddress = nil
+                            searchCompleter.clear()
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.tertiary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 18)
+                .padding(.vertical, 12)
+                .background(Color(UIColor.tertiarySystemFill))
+                .clipShape(Capsule())
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+
+            // Selected confirmation
+            if let address = selectedAddress {
+                HStack(spacing: 12) {
+                    Image(systemName: "eye.slash.fill")
+                        .font(.title2)
+                        .foregroundStyle(.purple)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(address)
+                            .font(.subheadline)
+                            .fontWeight(.medium)
+                        Text("Your presence will be hidden within 500 ft")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(16)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.purple.opacity(0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .padding(.horizontal, 16)
+                .padding(.top, 12)
+            }
+
+            // Suggestions
+            if !searchCompleter.suggestions.isEmpty && selectedAddress == nil {
+                List {
+                    ForEach(searchCompleter.suggestions, id: \.self) { suggestion in
+                        Button {
+                            resolveAddress(suggestion)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(suggestion.title)
+                                    .font(.subheadline)
+                                    .fontWeight(.medium)
+                                if !suggestion.subtitle.isEmpty {
+                                    Text(suggestion.subtitle)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .listStyle(.plain)
+            } else {
+                Spacer()
+            }
+        }
+        .fontDesign(.rounded)
+        .onAppear {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { isNameFocused = true }
+        }
+        .onChange(of: searchText) { _, newValue in
+            if suppressNextChange {
+                suppressNextChange = false
+                return
+            }
+            selectedCoordinate = nil
+            selectedAddress = nil
+            searchCompleter.search(newValue)
+        }
+    }
+
+    private func resolveAddress(_ suggestion: MKLocalSearchCompletion) {
+        isAddressFocused = false
+        searchCompleter.clear()
+        let request = MKLocalSearch.Request(completion: suggestion)
+        MKLocalSearch(request: request).start { response, _ in
+            if let item = response?.mapItems.first, let loc = item.placemark.location {
+                selectedCoordinate = loc.coordinate
+                selectedAddress = suggestion.title
+                suppressNextChange = true
+                searchText = suggestion.title
+            }
+        }
+    }
+}
+
 #Preview {
     ProfileView()
+        .environmentObject(InAppFavoritesManager())
 }

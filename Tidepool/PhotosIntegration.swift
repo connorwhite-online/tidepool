@@ -2,6 +2,7 @@ import Foundation
 import Photos
 import CoreLocation
 import MapKit
+import TidepoolShared
 
 // MARK: - Photo Location Data Models
 
@@ -14,9 +15,11 @@ struct PhotoLocationCluster: Identifiable {
     let timeSpentScore: Double // How much time they spend here (inferred from photo timestamps)
     let category: PlaceCategory
     let inferredName: String?
+    let poiId: String?       // Stable place ID from resolved business
+    let yelpId: String?      // Yelp business ID if matched
     let firstVisit: Date
     let lastVisit: Date
-    
+
     var interestWeight: Double {
         // Combine frequency and time spent for overall interest score
         return (frequencyScore * 0.6) + (timeSpentScore * 0.4)
@@ -51,7 +54,7 @@ class PhotosIntegrationManager: ObservableObject {
     private let minClusterRadius: Double = 50.0 // 50 meters
     private let maxClusterRadius: Double = 500.0 // 500 meters
     private let minPhotosPerCluster: Int = 3
-    private let maxClusters: Int = 50
+    private let maxClusters: Int = .max
     
     init() {
         authorizationStatus = PHPhotoLibrary.authorizationStatus(for: .readWrite)
@@ -91,25 +94,316 @@ class PhotosIntegrationManager: ObservableObject {
     
     private func processPhotoLocations() async {
         isProcessing = true
-        
-        let photoLocations = await fetchPhotoLocations()
-        let newClusters = await clusterLocations(photoLocations)
-        let enhancedClusters = await enhanceClustersWithPlaceData(newClusters)
-        
-        clusters = enhancedClusters
+
+        // Step 1: Fetch all geotagged photos (background thread)
+        let photoLocations = await Task.detached(priority: .userInitiated) {
+            await self.fetchPhotoLocationsBackground()
+        }.value
+
+        // Clear POI cache to get fresh results
+        userDefaults.removeObject(forKey: poiCacheKey)
+
+        // Step 2: Build frequency grid and find hotspots (deterministic, pure math)
+        let hotspots = await Task.detached(priority: .userInitiated) {
+            self.findHotspots(photoLocations, metersPerCell: 30, minPhotos: 3)
+        }.value
+
+        // Filter out likely-home hotspots (500+ photos = you live there)
+        let filteredHotspots = hotspots.filter { $0.photos.count < 500 }
+        print("[Photos] \(hotspots.count) hotspots found, \(hotspots.count - filteredHotspots.count) excluded as likely-home, resolving \(filteredHotspots.count)")
+
+        // Step 3: Resolve hotspot names via MapKit (cached per coordinate)
+        let finalClusters = await resolveHotspotsToPOIs(filteredHotspots)
+
+        clusters = finalClusters
         lastProcessed = Date()
         userDefaults.set(lastProcessed, forKey: lastProcessedKey)
-        
+
         metrics = PhotoLocationMetrics(
             totalPhotos: photoLocations.count,
             locationEnabledPhotos: photoLocations.count,
-            clusters: enhancedClusters,
+            clusters: finalClusters,
             dateRange: dateRangeFrom(photoLocations),
             processingDate: Date()
         )
-        
+        userDefaults.set(photoLocations.count, forKey: "photos_total_count")
+        print("[Photos] Total geotagged: \(photoLocations.count), hotspots: \(hotspots.count), resolved: \(finalClusters.filter { $0.inferredName != nil }.count)")
+
         saveClusters()
+        backfillVisitsFromClusters()
         isProcessing = false
+    }
+
+    // MARK: - Hotspot Detection (deterministic, pure math)
+
+    private struct Hotspot {
+        let centerLat: Double
+        let centerLon: Double
+        let photos: [PhotoLocation]
+        let distinctDays: Int
+    }
+
+    /// Build frequency grid, find cells with enough photos, flood-fill merge adjacent cells.
+    private nonisolated func findHotspots(_ photos: [PhotoLocation], metersPerCell: Double, minPhotos: Int) -> [Hotspot] {
+        let latMeters = 111_000.0
+
+        // Quantize photos to grid cells
+        var cellPhotos: [String: [PhotoLocation]] = [:]
+        var cellXY: [String: (Int, Int)] = [:]
+
+        for photo in photos {
+            let lonMeters = latMeters * cos(photo.coordinate.latitude * .pi / 180)
+            let x = Int(floor(photo.coordinate.longitude * lonMeters / metersPerCell))
+            let y = Int(floor(photo.coordinate.latitude * latMeters / metersPerCell))
+            let key = "\(x)_\(y)"
+            cellPhotos[key, default: []].append(photo)
+            cellXY[key] = (x, y)
+        }
+
+        // Find hot cells (minPhotos threshold)
+        let hotKeys = Set(cellPhotos.filter { $0.value.count >= minPhotos }.keys)
+
+        // Flood-fill merge adjacent hot cells
+        var visited = Set<String>()
+        var hotspots: [Hotspot] = []
+
+        for key in hotKeys where !visited.contains(key) {
+            var queue = [key]
+            var groupPhotos: [PhotoLocation] = []
+
+            while !queue.isEmpty {
+                let current = queue.removeFirst()
+                guard !visited.contains(current), hotKeys.contains(current) else { continue }
+                visited.insert(current)
+                groupPhotos.append(contentsOf: cellPhotos[current] ?? [])
+
+                if let (x, y) = cellXY[current] {
+                    for dx in -1...1 {
+                        for dy in -1...1 {
+                            if dx == 0 && dy == 0 { continue }
+                            let nk = "\(x + dx)_\(y + dy)"
+                            if hotKeys.contains(nk) && !visited.contains(nk) {
+                                queue.append(nk)
+                            }
+                        }
+                    }
+                }
+            }
+
+            guard !groupPhotos.isEmpty else { continue }
+
+            let avgLat = groupPhotos.reduce(0.0) { $0 + $1.coordinate.latitude } / Double(groupPhotos.count)
+            let avgLon = groupPhotos.reduce(0.0) { $0 + $1.coordinate.longitude } / Double(groupPhotos.count)
+            let distinctDays = Set(groupPhotos.map { Calendar.current.startOfDay(for: $0.timestamp) }).count
+
+            hotspots.append(Hotspot(centerLat: avgLat, centerLon: avgLon, photos: groupPhotos, distinctDays: distinctDays))
+        }
+
+        return hotspots.sorted { $0.photos.count > $1.photos.count }
+    }
+
+    // MARK: - POI Resolution (cached per hotspot coordinate)
+
+    private let poiCacheKey = "photo_poi_cache"
+
+    private func resolveHotspotsToPOIs(_ hotspots: [Hotspot]) async -> [PhotoLocationCluster] {
+        // Load cache
+        var cache: [String: (name: String, category: String)] = [:]
+        if let data = userDefaults.data(forKey: poiCacheKey),
+           let cached = try? JSONDecoder().decode([String: [String]].self, from: data) {
+            for (key, vals) in cached where vals.count == 2 {
+                cache[key] = (name: vals[0], category: vals[1])
+            }
+        }
+
+        var results: [PhotoLocationCluster] = []
+
+        for batchStart in stride(from: 0, to: hotspots.count, by: 10) {
+            let batchEnd = min(batchStart + 10, hotspots.count)
+
+            let batchResults = await withTaskGroup(of: PhotoLocationCluster?.self) { group in
+                for hotspot in hotspots[batchStart..<batchEnd] {
+                    group.addTask {
+                        let cacheKey = String(format: "%.4f_%.4f", hotspot.centerLat, hotspot.centerLon)
+                        let sortedDates = hotspot.photos.map { $0.timestamp }.sorted()
+                        let first = sortedDates.first ?? Date()
+                        let last = sortedDates.last ?? Date()
+                        let coord = CLLocationCoordinate2D(latitude: hotspot.centerLat, longitude: hotspot.centerLon)
+
+                        let frequencyScore = min(Double(hotspot.distinctDays) / 20.0, 1.0)
+                        let spanYears = last.timeIntervalSince(first) / (365.25 * 86400)
+                        let spanScore = hotspot.distinctDays > 1 ? min(spanYears / 5.0, 1.0) : 0.0
+
+                        // Check cache
+                        if let cached = cache[cacheKey] {
+                            return PhotoLocationCluster(
+                                centerCoordinate: coord, radius: 30,
+                                photoCount: hotspot.photos.count,
+                                frequencyScore: frequencyScore, timeSpentScore: spanScore,
+                                category: PlaceCategory(rawValue: cached.category) ?? .other,
+                                inferredName: cached.name,
+                                poiId: FavoriteLocation.stablePlaceId(name: cached.name, coordinate: coord),
+                                yelpId: nil, firstVisit: first, lastVisit: last
+                            )
+                        }
+
+                        // POI search (100m radius)
+                        let poi = await self.findNearestPOI(lat: hotspot.centerLat, lon: hotspot.centerLon, radiusMeters: 100)
+
+                        return PhotoLocationCluster(
+                            centerCoordinate: poi?.2 ?? coord, radius: 30,
+                            photoCount: hotspot.photos.count,
+                            frequencyScore: frequencyScore, timeSpentScore: spanScore,
+                            category: poi?.1 ?? .other,
+                            inferredName: poi?.0,
+                            poiId: poi.flatMap { p in FavoriteLocation.stablePlaceId(name: p.0, coordinate: p.2) },
+                            yelpId: nil, firstVisit: first, lastVisit: last
+                        )
+                    }
+                }
+
+                var batch: [PhotoLocationCluster] = []
+                for await r in group { if let r { batch.append(r) } }
+                return batch
+            }
+
+            results.append(contentsOf: batchResults)
+            if batchEnd < hotspots.count {
+                try? await Task.sleep(nanoseconds: 50_000_000) // 50ms between batches
+            }
+        }
+
+        // Update cache
+        var newCache: [String: [String]] = [:]
+        for cluster in results where cluster.inferredName != nil {
+            let key = String(format: "%.4f_%.4f", cluster.centerCoordinate.latitude, cluster.centerCoordinate.longitude)
+            newCache[key] = [cluster.inferredName!, cluster.category.rawValue]
+        }
+        if let data = try? JSONEncoder().encode(newCache) {
+            userDefaults.set(data, forKey: poiCacheKey)
+        }
+
+        return results.sorted { $0.photoCount > $1.photoCount }
+    }
+
+    /// Multi-strategy POI resolution with logging.
+    private func findNearestPOI(lat: Double, lon: Double, radiusMeters: Double) async -> (String, PlaceCategory, CLLocationCoordinate2D)? {
+        let center = CLLocationCoordinate2D(latitude: lat, longitude: lon)
+        let location = CLLocation(latitude: lat, longitude: lon)
+
+        // Strategy 1: MKLocalSearch with empty query (returns ALL nearby businesses)
+        let searchResult = await withCheckedContinuation { (continuation: CheckedContinuation<MKMapItem?, Never>) in
+            let request = MKLocalSearch.Request()
+            request.naturalLanguageQuery = ""
+            request.region = MKCoordinateRegion(center: center, latitudinalMeters: radiusMeters, longitudinalMeters: radiusMeters)
+            MKLocalSearch(request: request).start { response, _ in
+                let best = response?.mapItems
+                    .filter { $0.name != nil && $0.placemark.location != nil }
+                    .filter { $0.placemark.location!.distance(from: location) <= radiusMeters }
+                    .sorted { ($0.placemark.location?.distance(from: location) ?? .infinity) < ($1.placemark.location?.distance(from: location) ?? .infinity) }
+                    .first
+                continuation.resume(returning: best)
+            }
+        }
+
+        if let item = searchResult, let name = item.name {
+            return (name, PlaceCategory.from(mapItem: item), item.placemark.location?.coordinate ?? center)
+        }
+
+        // Strategy 2: POI-specific search
+        let poiResult = await withCheckedContinuation { (continuation: CheckedContinuation<MKMapItem?, Never>) in
+            let request = MKLocalPointsOfInterestRequest(center: center, radius: radiusMeters)
+            MKLocalSearch(request: request).start { response, _ in
+                let best = response?.mapItems
+                    .filter { $0.name != nil && $0.placemark.location != nil }
+                    .filter { $0.placemark.location!.distance(from: location) <= radiusMeters }
+                    .sorted { ($0.placemark.location?.distance(from: location) ?? .infinity) < ($1.placemark.location?.distance(from: location) ?? .infinity) }
+                    .first
+                continuation.resume(returning: best)
+            }
+        }
+
+        if let item = poiResult, let name = item.name {
+            return (name, PlaceCategory.from(mapItem: item), item.placemark.location?.coordinate ?? center)
+        }
+
+        // Strategy 3: Reverse geocode
+        let geocodeResult = await withCheckedContinuation { (continuation: CheckedContinuation<CLPlacemark?, Never>) in
+            CLGeocoder().reverseGeocodeLocation(location) { placemarks, _ in
+                continuation.resume(returning: placemarks?.first)
+            }
+        }
+
+        if let placemark = geocodeResult, let name = placemark.name {
+            let looksLikeAddress = name.first?.isNumber == true
+            if !looksLikeAddress {
+                let category = inferPlaceCategory(from: placemark)
+                return (name, category, placemark.location?.coordinate ?? center)
+            }
+        }
+
+        return nil
+    }
+
+    private func inferPlaceCategory(from placemark: CLPlacemark) -> PlaceCategory {
+        let name = (placemark.name ?? "").lowercased()
+        if name.contains("park") || name.contains("trail") || name.contains("beach") { return .park }
+        if name.contains("coffee") || name.contains("cafe") { return .cafe }
+        if name.contains("restaurant") || name.contains("food") { return .restaurant }
+        if name.contains("gym") || name.contains("fitness") { return .gym }
+        if name.contains("bar") || name.contains("pub") { return .bar }
+        if name.contains("mall") || name.contains("shop") { return .shopping }
+        if name.contains("school") || name.contains("university") { return .school }
+        if name.contains("hospital") { return .hospital }
+        return .other
+    }
+
+    /// Fetch photo locations on a background thread (no main actor).
+    private nonisolated func fetchPhotoLocationsBackground() async -> [PhotoLocation] {
+        let fetchOptions = PHFetchOptions()
+        fetchOptions.includeHiddenAssets = false
+
+        let assets = PHAsset.fetchAssets(with: .image, options: fetchOptions)
+        var photoLocations: [PhotoLocation] = []
+
+        assets.enumerateObjects { asset, _, _ in
+            guard let location = asset.location else { return }
+            photoLocations.append(PhotoLocation(
+                coordinate: location.coordinate,
+                timestamp: asset.creationDate ?? Date(),
+                asset: asset
+            ))
+        }
+
+        return photoLocations
+    }
+
+    /// Cluster locations synchronously (pure computation, no UI).
+    private nonisolated func clusterLocationsSync(_ locations: [PhotoLocation]) -> [PhotoLocationCluster] {
+        guard !locations.isEmpty else { return [] }
+
+        let sortedLocations = locations.sorted { $0.timestamp < $1.timestamp }
+        var clusters: [LocationClusterBuilder] = []
+
+        for location in sortedLocations {
+            var addedToCluster = false
+            for cluster in clusters {
+                if cluster.canAdd(location, maxRadius: maxClusterRadius) {
+                    cluster.add(location)
+                    addedToCluster = true
+                    break
+                }
+            }
+            if !addedToCluster {
+                clusters.append(LocationClusterBuilder(initialLocation: location))
+            }
+        }
+
+        return clusters
+            .filter { $0.locations.count >= minPhotosPerCluster }
+            .sorted { $0.interestScore > $1.interestScore }
+            .prefix(maxClusters)
+            .map { $0.toPhotoLocationCluster() }
     }
     
     private func fetchPhotoLocations() async -> [PhotoLocation] {
@@ -170,77 +464,84 @@ class PhotosIntegrationManager: ObservableObject {
     }
     
     private func enhanceClustersWithPlaceData(_ clusters: [PhotoLocationCluster]) async -> [PhotoLocationCluster] {
-        var enhancedClusters: [PhotoLocationCluster] = []
-        
-        for cluster in clusters {
-            let enhancedCluster = await enhanceClusterWithPlaceInfo(cluster)
-            enhancedClusters.append(enhancedCluster)
+        // Process clusters concurrently (up to 5 at a time to avoid geocoder rate limits)
+        return await withTaskGroup(of: (Int, PhotoLocationCluster).self) { group in
+            for (i, cluster) in clusters.enumerated() {
+                group.addTask {
+                    let enhanced = await self.enhanceClusterWithPlaceInfo(cluster)
+                    return (i, enhanced)
+                }
+            }
+            var results = [(Int, PhotoLocationCluster)]()
+            for await result in group {
+                results.append(result)
+            }
+            return results.sorted { $0.0 < $1.0 }.map { $0.1 }
         }
-        
-        return enhancedClusters
     }
     
     private func enhanceClusterWithPlaceInfo(_ cluster: PhotoLocationCluster) async -> PhotoLocationCluster {
-        return await withCheckedContinuation { continuation in
-            let geocoder = CLGeocoder()
-            let location = CLLocation(latitude: cluster.centerCoordinate.latitude, longitude: cluster.centerCoordinate.longitude)
-            
-            geocoder.reverseGeocodeLocation(location) { placemarks, error in
-                var enhancedCluster = cluster
-                
-                if let placemark = placemarks?.first {
-                    // Try to infer place type from placemark
-                    let inferredCategory = self.inferPlaceCategory(from: placemark)
-                    let inferredName = self.generatePlaceName(from: placemark)
-                    
-                    enhancedCluster = PhotoLocationCluster(
-                        centerCoordinate: cluster.centerCoordinate,
-                        radius: cluster.radius,
-                        photoCount: cluster.photoCount,
-                        frequencyScore: cluster.frequencyScore,
-                        timeSpentScore: cluster.timeSpentScore,
-                        category: inferredCategory,
-                        inferredName: inferredName,
-                        firstVisit: cluster.firstVisit,
-                        lastVisit: cluster.lastVisit
-                    )
-                }
-                
-                continuation.resume(returning: enhancedCluster)
+        let location = CLLocation(latitude: cluster.centerCoordinate.latitude, longitude: cluster.centerCoordinate.longitude)
+
+        // Step 1: Reverse geocode
+        let placemark = await withCheckedContinuation { (continuation: CheckedContinuation<CLPlacemark?, Never>) in
+            CLGeocoder().reverseGeocodeLocation(location) { placemarks, _ in
+                continuation.resume(returning: placemarks?.first)
             }
         }
+
+        let geocodedName = placemark.flatMap { generatePlaceName(from: $0) }
+        let geocodedCategory = placemark.map { inferPlaceCategory(from: $0) } ?? .other
+
+        // Step 2: MKLocalSearch to find actual business
+        let searchName = geocodedName ?? "place"
+        let searchResult = await withCheckedContinuation { (continuation: CheckedContinuation<MKMapItem?, Never>) in
+            let request = MKLocalSearch.Request()
+            request.naturalLanguageQuery = searchName
+            request.region = MKCoordinateRegion(
+                center: cluster.centerCoordinate,
+                latitudinalMeters: 200,
+                longitudinalMeters: 200
+            )
+            MKLocalSearch(request: request).start { response, _ in
+                // Pick closest match within 100m
+                let best = response?.mapItems.first { item in
+                    guard let itemLoc = item.placemark.location else { return false }
+                    return itemLoc.distance(from: location) < 100
+                }
+                continuation.resume(returning: best ?? response?.mapItems.first)
+            }
+        }
+
+        let resolvedName = searchResult?.name ?? geocodedName
+        let resolvedCategory = searchResult.flatMap { PlaceCategory.from(mapItem: $0) } ?? geocodedCategory
+        let resolvedCoord = searchResult?.placemark.location?.coordinate ?? cluster.centerCoordinate
+        let poiId = resolvedName.map { FavoriteLocation.stablePlaceId(name: $0, coordinate: resolvedCoord) }
+
+        // Step 3: Try Yelp match (best-effort)
+        var yelpId: String? = nil
+        if let name = resolvedName {
+            yelpId = try? await BackendClient.shared.matchPlace(
+                name: name, lat: resolvedCoord.latitude, lng: resolvedCoord.longitude
+            ).yelpID
+        }
+
+        return PhotoLocationCluster(
+            centerCoordinate: resolvedCoord,
+            radius: cluster.radius,
+            photoCount: cluster.photoCount,
+            frequencyScore: cluster.frequencyScore,
+            timeSpentScore: cluster.timeSpentScore,
+            category: resolvedCategory,
+            inferredName: resolvedName,
+            poiId: poiId,
+            yelpId: yelpId,
+            firstVisit: cluster.firstVisit,
+            lastVisit: cluster.lastVisit
+        )
     }
     
-    private func inferPlaceCategory(from placemark: CLPlacemark) -> PlaceCategory {
-        // Analyze placemark properties to infer venue type
-        let name = placemark.name?.lowercased() ?? ""
-        let thoroughfare = placemark.thoroughfare?.lowercased() ?? ""
-        let subThoroughfare = placemark.subThoroughfare?.lowercased() ?? ""
-        
-        // Check for specific venue types based on naming patterns
-        let combinedInfo = "\(name) \(thoroughfare) \(subThoroughfare)"
-        
-        if combinedInfo.contains("park") || combinedInfo.contains("trail") || combinedInfo.contains("beach") {
-            return .park
-        } else if combinedInfo.contains("mall") || combinedInfo.contains("shopping") {
-            return .shopping
-        } else if combinedInfo.contains("restaurant") || combinedInfo.contains("food") {
-            return .restaurant
-        } else if combinedInfo.contains("coffee") || combinedInfo.contains("cafe") {
-            return .cafe
-        } else if combinedInfo.contains("gym") || combinedInfo.contains("fitness") {
-            return .gym
-        } else if combinedInfo.contains("school") || combinedInfo.contains("university") {
-            return .school
-        } else if combinedInfo.contains("hospital") || combinedInfo.contains("medical") {
-            return .hospital
-        } else if name.isEmpty && placemark.subThoroughfare != nil {
-            // Likely a residence if it has a street number but no specific name
-            return .home
-        }
-        
-        return .other
-    }
+    // inferPlaceCategory is defined above in the POI resolution section
     
     private func generatePlaceName(from placemark: CLPlacemark) -> String? {
         if let name = placemark.name, !name.isEmpty {
@@ -280,6 +581,57 @@ class PhotosIntegrationManager: ObservableObject {
         return tagCounts
     }
     
+    // MARK: - Visit Backfill from Photo Clusters
+
+    private let backfilledKey = "photo_clusters_backfilled"
+
+    private func backfillVisitsFromClusters() {
+        let backfilled = Set(UserDefaults.standard.stringArray(forKey: backfilledKey) ?? [])
+        let iso = ISO8601DateFormatter()
+        var newBackfilled = backfilled
+        var visits: [VisitReport] = []
+
+        for cluster in clusters {
+            let clusterKey = "\(cluster.centerCoordinate.latitude)_\(cluster.centerCoordinate.longitude)"
+            guard !backfilled.contains(clusterKey) else { continue }
+            guard cluster.category != .home else { continue }
+
+            let sharedCategory = TidepoolShared.PlaceCategory(rawValue: cluster.category.rawValue) ?? .other
+            let calendar = Calendar.current
+
+            let report = VisitReport(
+                poiId: cluster.poiId,
+                yelpId: cluster.yelpId,
+                name: cluster.inferredName ?? "Photo location",
+                category: sharedCategory,
+                latitude: cluster.centerCoordinate.latitude,
+                longitude: cluster.centerCoordinate.longitude,
+                arrivedAt: iso.string(from: cluster.firstVisit),
+                departedAt: iso.string(from: cluster.lastVisit),
+                dayOfWeek: calendar.component(.weekday, from: cluster.firstVisit) - 1,
+                hourOfDay: calendar.component(.hour, from: cluster.firstVisit),
+                durationMinutes: Int(cluster.lastVisit.timeIntervalSince(cluster.firstVisit) / 60),
+                confidence: 0.5,
+                source: "photo"
+            )
+            visits.append(report)
+            newBackfilled.insert(clusterKey)
+        }
+
+        guard !visits.isEmpty else { return }
+        UserDefaults.standard.set(Array(newBackfilled), forKey: backfilledKey)
+
+        Task { @MainActor in
+            guard BackendClient.shared.isAuthenticated else { return }
+            do {
+                let response = try await BackendClient.shared.uploadVisits(VisitBatchRequest(visits: visits))
+                print("[PhotosIntegration] backfilled \(response.accepted) visits from photo clusters")
+            } catch {
+                print("[PhotosIntegration] backfill failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
     private func saveClusters() {
         guard let data = try? JSONEncoder().encode(clusters) else { return }
         userDefaults.set(data, forKey: clustersKey)
@@ -304,19 +656,17 @@ class PhotosIntegrationManager: ObservableObject {
     /// Get a summary of discovered places for display
     func getPlacesSummary() -> String? {
         guard !clusters.isEmpty else { return nil }
-        
-        let categories = Dictionary(grouping: clusters, by: { $0.category })
-        let topCategories = categories
-            .sorted { $0.value.count > $1.value.count }
-            .prefix(3)
-            .map { "\($0.value.count) \($0.key.displayName.lowercased())" }
-        
-        if topCategories.count == 1 {
-            return topCategories.first
-        } else if topCategories.count == 2 {
-            return topCategories.joined(separator: " and ")
+
+        let photoCount = metrics?.totalPhotos ?? userDefaults.integer(forKey: "photos_total_count")
+        let geotagged = metrics?.locationEnabledPhotos ?? clusters.reduce(0) { $0 + $1.photoCount }
+        let nonHome = clusters.filter { $0.category != .home }
+        let namedCount = nonHome.filter { InterestVectorManager.isLegitPlaceName($0) }.count
+
+        let photoStr = photoCount > 1000 ? "\(photoCount / 1000)k" : "\(photoCount)"
+        if namedCount > 0 {
+            return "\(photoStr) scanned · \(namedCount) places identified"
         } else {
-            return topCategories.dropLast().joined(separator: ", ") + ", and " + topCategories.last!
+            return "\(photoStr) scanned · \(nonHome.count) locations"
         }
     }
 }
@@ -388,6 +738,8 @@ private class LocationClusterBuilder {
             timeSpentScore: calculateTimeSpentScore(),
             category: .other, // Will be enhanced later
             inferredName: nil, // Will be enhanced later
+            poiId: nil,
+            yelpId: nil,
             firstVisit: timestamps.first ?? Date(),
             lastVisit: timestamps.last ?? Date()
         )
@@ -437,7 +789,7 @@ extension PhotoLocationCluster: Equatable {
 extension PhotoLocationCluster: Codable {
     enum CodingKeys: String, CodingKey {
         case centerCoordinate, radius, photoCount, frequencyScore, timeSpentScore
-        case category, inferredName, firstVisit, lastVisit
+        case category, inferredName, poiId, yelpId, firstVisit, lastVisit
         case latitude, longitude
     }
     
@@ -454,6 +806,8 @@ extension PhotoLocationCluster: Codable {
         timeSpentScore = try container.decode(Double.self, forKey: .timeSpentScore)
         category = try container.decode(PlaceCategory.self, forKey: .category)
         inferredName = try container.decodeIfPresent(String.self, forKey: .inferredName)
+        poiId = try container.decodeIfPresent(String.self, forKey: .poiId)
+        yelpId = try container.decodeIfPresent(String.self, forKey: .yelpId)
         firstVisit = try container.decode(Date.self, forKey: .firstVisit)
         lastVisit = try container.decode(Date.self, forKey: .lastVisit)
     }
@@ -469,6 +823,8 @@ extension PhotoLocationCluster: Codable {
         try container.encode(timeSpentScore, forKey: .timeSpentScore)
         try container.encode(category, forKey: .category)
         try container.encodeIfPresent(inferredName, forKey: .inferredName)
+        try container.encodeIfPresent(poiId, forKey: .poiId)
+        try container.encodeIfPresent(yelpId, forKey: .yelpId)
         try container.encode(firstVisit, forKey: .firstVisit)
         try container.encode(lastVisit, forKey: .lastVisit)
     }

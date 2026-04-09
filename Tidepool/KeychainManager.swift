@@ -5,6 +5,19 @@ import Security
 
 enum KeychainKey: String {
     case spotifyCredentials = "com.tidepool.spotify.credentials"
+    case backendCredentials = "com.tidepool.backend.credentials"
+}
+
+// MARK: - Backend Credentials
+
+struct BackendCredentials: Codable {
+    let token: String
+    let deviceID: String
+    let expiresAt: Date
+
+    var isExpired: Bool {
+        Date() >= expiresAt
+    }
 }
 
 // MARK: - Keychain Errors

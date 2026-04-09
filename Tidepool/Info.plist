@@ -19,6 +19,16 @@
 	<array>
 		<string>remote-notification</string>
 		<string>location</string>
+		<string>processing</string>
 	</array>
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>studio.connorwhite.Tidepool.visitUpload</string>
+	</array>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+	</dict>
 </dict>
 </plist>

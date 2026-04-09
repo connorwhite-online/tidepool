@@ -1,6 +1,7 @@
 import Foundation
 import CoreLocation
 import SwiftUI
+import TidepoolShared
 
 // MARK: - Favorite Location Data Model
 
@@ -10,19 +11,26 @@ struct FavoriteLocation: Identifiable, Codable {
     let name: String
     let category: PlaceCategory
     let coordinate: CLLocationCoordinate2D
-    let rating: Int // 1-5 scale
+    let rating: Int? // 1-5 scale, nil for quick-favorited places
     let notes: String?
     let createdAt: Date
     let lastVisited: Date?
     let visitCount: Int
     let tags: [String]
-    
+
     enum CodingKeys: String, CodingKey {
         case id, placeId, name, category, rating, notes, createdAt, lastVisited, visitCount, tags
         case latitude, longitude
     }
-    
-    init(placeId: String, name: String, category: PlaceCategory, coordinate: CLLocationCoordinate2D, rating: Int, notes: String? = nil, tags: [String] = []) {
+
+    /// Generate a stable place ID from name and coordinate so the same physical place always maps to the same ID
+    static func stablePlaceId(name: String, coordinate: CLLocationCoordinate2D) -> String {
+        let lat = String(format: "%.5f", coordinate.latitude)
+        let lon = String(format: "%.5f", coordinate.longitude)
+        return "\(name)_\(lat)_\(lon)"
+    }
+
+    init(placeId: String, name: String, category: PlaceCategory, coordinate: CLLocationCoordinate2D, rating: Int? = nil, notes: String? = nil, tags: [String] = []) {
         self.id = UUID()
         self.placeId = placeId
         self.name = name
@@ -35,32 +43,32 @@ struct FavoriteLocation: Identifiable, Codable {
         self.visitCount = 1
         self.tags = tags
     }
-    
+
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(UUID.self, forKey: .id)
         placeId = try container.decode(String.self, forKey: .placeId)
         name = try container.decode(String.self, forKey: .name)
         category = try container.decode(PlaceCategory.self, forKey: .category)
-        rating = try container.decode(Int.self, forKey: .rating)
+        rating = try container.decodeIfPresent(Int.self, forKey: .rating)
         notes = try container.decodeIfPresent(String.self, forKey: .notes)
         createdAt = try container.decode(Date.self, forKey: .createdAt)
         lastVisited = try container.decodeIfPresent(Date.self, forKey: .lastVisited)
         visitCount = try container.decode(Int.self, forKey: .visitCount)
         tags = try container.decode([String].self, forKey: .tags)
-        
+
         let latitude = try container.decode(Double.self, forKey: .latitude)
         let longitude = try container.decode(Double.self, forKey: .longitude)
         coordinate = CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
     }
-    
+
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(id, forKey: .id)
         try container.encode(placeId, forKey: .placeId)
         try container.encode(name, forKey: .name)
         try container.encode(category, forKey: .category)
-        try container.encode(rating, forKey: .rating)
+        try container.encodeIfPresent(rating, forKey: .rating)
         try container.encodeIfPresent(notes, forKey: .notes)
         try container.encode(createdAt, forKey: .createdAt)
         try container.encodeIfPresent(lastVisited, forKey: .lastVisited)
@@ -69,16 +77,16 @@ struct FavoriteLocation: Identifiable, Codable {
         try container.encode(coordinate.latitude, forKey: .latitude)
         try container.encode(coordinate.longitude, forKey: .longitude)
     }
-    
+
     /// Get interest weight based on rating, visit count, and recency
     var interestWeight: Double {
-        let ratingWeight = Double(rating) / 5.0
+        let ratingWeight = Double(rating ?? 3) / 5.0
         let visitWeight = min(Double(visitCount) / 10.0, 1.0) // Cap at 10 visits
         let recencyWeight = recencyScore()
-        
+
         return (ratingWeight * 0.5) + (visitWeight * 0.3) + (recencyWeight * 0.2)
     }
-    
+
     private func recencyScore() -> Double {
         let daysSinceCreated = Date().timeIntervalSince(createdAt) / (24 * 60 * 60)
         // Decay function: newer favorites have higher weight
@@ -111,6 +119,9 @@ class InAppFavoritesManager: ObservableObject {
     
     private let userDefaults = UserDefaults.standard
     private let favoritesKey = "in_app_favorites"
+    private let serverIDsKey = "favorites_server_ids"
+    /// Maps local placeId → server-side UUID string for efficient deletes
+    private var serverIDMap: [String: String] = [:]
     
     enum SortOrder: String, CaseIterable {
         case recentlyAdded = "Recently Added"
@@ -124,7 +135,7 @@ class InAppFavoritesManager: ObservableObject {
             case .recentlyAdded:
                 return favorites.sorted { $0.createdAt > $1.createdAt }
             case .highestRated:
-                return favorites.sorted { $0.rating > $1.rating }
+                return favorites.sorted { ($0.rating ?? 0) > ($1.rating ?? 0) }
             case .mostVisited:
                 return favorites.sorted { $0.visitCount > $1.visitCount }
             case .alphabetical:
@@ -137,6 +148,8 @@ class InAppFavoritesManager: ObservableObject {
     
     init() {
         loadFavorites()
+        loadServerIDMap()
+        reconcileWithBackend()
     }
     
     var filteredAndSortedFavorites: [FavoriteLocation] {
@@ -159,7 +172,10 @@ class InAppFavoritesManager: ObservableObject {
         return sortOrder.sort(filtered)
     }
     
-    func addFavorite(placeId: String, name: String, category: PlaceCategory, coordinate: CLLocationCoordinate2D, rating: Int, notes: String? = nil, tags: [String] = []) {
+    func addFavorite(placeId: String, name: String, category: PlaceCategory, coordinate: CLLocationCoordinate2D, rating: Int? = nil, notes: String? = nil, tags: [String] = []) {
+        // Don't add duplicates
+        guard !isFavorited(placeId) else { return }
+
         let favorite = FavoriteLocation(
             placeId: placeId,
             name: name,
@@ -169,18 +185,26 @@ class InAppFavoritesManager: ObservableObject {
             notes: notes,
             tags: tags
         )
-        
+
         favorites.append(favorite)
         saveFavorites()
-        
-        // Haptic feedback for successful addition
+        syncAddToBackend(favorite)
+
         HapticFeedbackManager.shared.notification(.success)
+    }
+
+    /// Quick-favorite a place with just name, category, and coordinate (no rating required)
+    func quickFavorite(name: String, category: PlaceCategory, coordinate: CLLocationCoordinate2D) {
+        let placeId = FavoriteLocation.stablePlaceId(name: name, coordinate: coordinate)
+        addFavorite(placeId: placeId, name: name, category: category, coordinate: coordinate)
     }
     
     func removeFavorite(for placeId: String) {
+        let removed = favorites.first { $0.placeId == placeId }
         favorites.removeAll { $0.placeId == placeId }
         saveFavorites()
-        
+        if let removed { syncDeleteFromBackend(removed) }
+
         // Haptic feedback for removal
         HapticFeedbackManager.shared.impact(.medium)
     }
@@ -248,7 +272,7 @@ class InAppFavoritesManager: ObservableObject {
             }
             
             // Add rating-based tags
-            if favorite.rating >= 4 {
+            if (favorite.rating ?? 0) >= 4 {
                 tagCounts["highly_rated", default: 0] += weight
             }
         }
@@ -259,7 +283,8 @@ class InAppFavoritesManager: ObservableObject {
     /// Get stats for profile display
     func getStats() -> FavoriteStats {
         let totalFavorites = favorites.count
-        let averageRating = favorites.isEmpty ? 0.0 : Double(favorites.map { $0.rating }.reduce(0, +)) / Double(favorites.count)
+        let ratedFavorites = favorites.compactMap { $0.rating }
+        let averageRating = ratedFavorites.isEmpty ? 0.0 : Double(ratedFavorites.reduce(0, +)) / Double(ratedFavorites.count)
         let categoryCounts = Dictionary(grouping: favorites, by: { $0.category })
             .mapValues { $0.count }
         let topCategory = categoryCounts.max(by: { $0.value < $1.value })?.key
@@ -272,6 +297,100 @@ class InAppFavoritesManager: ObservableObject {
         )
     }
     
+    // MARK: - Backend Sync
+
+    /// Reconcile local favorites with server on launch.
+    func reconcileWithBackend() {
+        guard BackendClient.shared.isAuthenticated else { return }
+        Task {
+            do {
+                let remote = try await BackendClient.shared.getFavorites()
+                let localIDs = Set(favorites.map { $0.placeId })
+                let remoteIDs = Set(remote.map { $0.placeID })
+
+                // Cache all server IDs
+                for remoteFav in remote {
+                    serverIDMap[remoteFav.placeID] = remoteFav.id
+                }
+                saveServerIDMap()
+
+                // Upload local favorites missing from server
+                for fav in favorites where !remoteIDs.contains(fav.placeId) {
+                    syncAddToBackend(fav)
+                }
+
+                // Download server favorites missing locally
+                for remoteFav in remote where !localIDs.contains(remoteFav.placeID) {
+                    let localCategory = PlaceCategory(rawValue: remoteFav.category.rawValue) ?? .other
+                    let local = FavoriteLocation(
+                        placeId: remoteFav.placeID,
+                        name: remoteFav.name,
+                        category: localCategory,
+                        coordinate: CLLocationCoordinate2D(latitude: 0, longitude: 0),
+                        rating: remoteFav.rating
+                    )
+                    favorites.append(local)
+                }
+                saveFavorites()
+            } catch {
+                print("[FavoritesSync] reconcile failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func syncAddToBackend(_ favorite: FavoriteLocation) {
+        guard BackendClient.shared.isAuthenticated else { return }
+        Task {
+            do {
+                let sharedCategory = TidepoolShared.PlaceCategory(rawValue: favorite.category.rawValue) ?? .other
+                let request = FavoriteRequest(
+                    placeID: favorite.placeId,
+                    yelpID: nil,
+                    name: favorite.name,
+                    category: sharedCategory,
+                    latitude: favorite.coordinate.latitude,
+                    longitude: favorite.coordinate.longitude,
+                    rating: favorite.rating
+                )
+                let response = try await BackendClient.shared.addFavorite(request)
+                serverIDMap[favorite.placeId] = response.id
+                saveServerIDMap()
+            } catch {
+                print("[FavoritesSync] add failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func syncDeleteFromBackend(_ favorite: FavoriteLocation) {
+        guard BackendClient.shared.isAuthenticated else { return }
+        Task {
+            do {
+                if let serverID = serverIDMap[favorite.placeId] {
+                    try await BackendClient.shared.deleteFavorite(id: serverID)
+                    serverIDMap.removeValue(forKey: favorite.placeId)
+                    saveServerIDMap()
+                }
+            } catch {
+                print("[FavoritesSync] delete failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    // MARK: - Server ID Map Persistence
+
+    private func loadServerIDMap() {
+        guard let data = userDefaults.data(forKey: serverIDsKey),
+              let map = try? JSONDecoder().decode([String: String].self, from: data) else { return }
+        serverIDMap = map
+    }
+
+    private func saveServerIDMap() {
+        guard let data = try? JSONEncoder().encode(serverIDMap) else { return }
+        userDefaults.set(data, forKey: serverIDsKey)
+    }
+
+    // MARK: - Local Persistence
+
     private func loadFavorites() {
         guard let data = userDefaults.data(forKey: favoritesKey),
               let loadedFavorites = try? JSONDecoder().decode([FavoriteLocation].self, from: data) else {
@@ -364,17 +483,13 @@ struct FavoritesListView: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
                     Button("All") {
-                        withAnimation(SpringPhysics.standard.swiftUISpring) {
-                            favoritesManager.filterCategory = nil
-                        }
+                        favoritesManager.filterCategory = nil
                     }
                     .buttonStyle(FilterButtonStyle(isSelected: favoritesManager.filterCategory == nil))
-                    
+
                     ForEach(uniqueCategories, id: \.self) { category in
                         Button(category.displayName) {
-                            withAnimation(SpringPhysics.standard.swiftUISpring) {
-                                favoritesManager.filterCategory = category
-                            }
+                            favoritesManager.filterCategory = category
                         }
                         .buttonStyle(FilterButtonStyle(isSelected: favoritesManager.filterCategory == category))
                     }
@@ -411,20 +526,17 @@ struct FavoritesListView: View {
     
     private var favoritesList: some View {
         List {
-            ForEach(favoritesManager.filteredAndSortedFavorites.indices, id: \.self) { index in
-                let favorite = favoritesManager.filteredAndSortedFavorites[index]
+            ForEach(favoritesManager.filteredAndSortedFavorites, id: \.id) { favorite in
                 FavoriteRowView(favorite: favorite, favoritesManager: favoritesManager)
-                    .staggeredAnimation(delay: Double(index) * 0.05)
                     .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                         Button("Delete", role: .destructive) {
-                            withAnimation(SpringPhysics.standard.swiftUISpring) {
-                                favoritesManager.removeFavorite(for: favorite.placeId)
-                            }
+                            favoritesManager.removeFavorite(for: favorite.placeId)
                         }
                     }
             }
         }
         .listStyle(.plain)
+        .animation(.default, value: favoritesManager.filterCategory)
     }
 }
 
@@ -454,15 +566,17 @@ struct FavoriteRowView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                     
                     HStack(spacing: 8) {
-                        // Rating stars
-                        HStack(spacing: 2) {
-                            ForEach(1...5, id: \.self) { star in
-                                Image(systemName: star <= favorite.rating ? "star.fill" : "star")
-                                    .font(.caption)
-                                    .foregroundStyle(star <= favorite.rating ? .yellow : .secondary)
+                        // Rating stars (if rated)
+                        if let rating = favorite.rating {
+                            HStack(spacing: 2) {
+                                ForEach(1...5, id: \.self) { star in
+                                    Image(systemName: star <= rating ? "star.fill" : "star")
+                                        .font(.caption)
+                                        .foregroundStyle(star <= rating ? .yellow : .secondary)
+                                }
                             }
                         }
-                        
+
                         Text(favorite.category.displayName)
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -511,17 +625,18 @@ struct FavoriteRowView: View {
 
 struct FilterButtonStyle: ButtonStyle {
     let isSelected: Bool
-    
+
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.caption)
+            .fontWeight(.medium)
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
             .background(isSelected ? Color.blue : Color(UIColor.quaternarySystemFill))
-            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .clipShape(Capsule())
             .foregroundStyle(isSelected ? .white : .primary)
             .scaleEffect(configuration.isPressed ? 0.95 : 1.0)
-            .animation(SpringPhysics.snappy.swiftUISpring, value: configuration.isPressed)
+            .animation(.easeOut(duration: 0.15), value: configuration.isPressed)
     }
 }
 
