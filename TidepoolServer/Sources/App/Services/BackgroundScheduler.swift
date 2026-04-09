@@ -4,29 +4,32 @@ import SQLKit
 /// Spawns background async loops on server boot for tidepool computation and cache warming.
 struct BackgroundScheduler: LifecycleHandler {
     func didBoot(_ app: Application) throws {
-        app.logger.info("[BackgroundScheduler] Starting background loops...")
+        app.logger.info("[BackgroundScheduler] Starting background loops (computation deferred)...")
 
-        // Tidepool computation loop
+        // Tidepool computation loop — wrapped in do/catch to never crash the server
         Task {
-            // Wait a bit for the server to fully initialize
-            try? await Task.sleep(nanoseconds: 10_000_000_000) // 10s
+            try? await Task.sleep(nanoseconds: 60_000_000_000) // 60s initial delay
 
             while !Task.isCancelled {
-                await runTidepoolComputation(app: app)
-
-                // Check every hour for stale tidepools
+                do {
+                    await runTidepoolComputation(app: app)
+                } catch {
+                    app.logger.error("[BackgroundScheduler] Tidepool computation error: \(error)")
+                }
                 try? await Task.sleep(nanoseconds: 3600_000_000_000) // 1 hour
             }
         }
 
-        // Stale user check loop (for triggered recomputes)
+        // Stale user check loop
         Task {
-            try? await Task.sleep(nanoseconds: 30_000_000_000) // 30s initial delay
+            try? await Task.sleep(nanoseconds: 120_000_000_000) // 2 min initial delay
 
             while !Task.isCancelled {
-                await recomputeStaleUsers(app: app)
-
-                // Check every 5 minutes for users who need recomputation
+                do {
+                    await recomputeStaleUsers(app: app)
+                } catch {
+                    app.logger.error("[BackgroundScheduler] Stale user check error: \(error)")
+                }
                 try? await Task.sleep(nanoseconds: 300_000_000_000) // 5 min
             }
         }

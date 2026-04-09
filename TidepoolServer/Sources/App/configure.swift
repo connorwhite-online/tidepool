@@ -58,8 +58,8 @@ func configure(_ app: Application) throws {
     app.middleware.use(ErrorMiddleware.default(environment: app.environment))
 
     // MARK: - Background Jobs
-
-    app.lifecycle.use(BackgroundScheduler())
+    // Temporarily disabled — scheduler crashes the server
+    // app.lifecycle.use(BackgroundScheduler())
 
     // MARK: - Routes
 

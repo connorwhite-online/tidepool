@@ -318,10 +318,12 @@ private struct LocationDetailContent: View {
         .task {
             guard !isLoadingEnrichment else { return }
             isLoadingEnrichment = true
+            print("[DetailSheet] Enriching '\(location.name)' — auth: \(BackendClient.shared.isAuthenticated)")
             enrichment = await YelpEnrichmentManager.shared.enrich(
                 name: location.name,
                 coordinate: location.coordinate
             )
+            print("[DetailSheet] Enrichment result: \(enrichment != nil ? "got data" : "nil")")
             isLoadingEnrichment = false
         }
     }
