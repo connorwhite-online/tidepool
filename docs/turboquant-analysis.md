@@ -112,6 +112,39 @@ Replace the float32 array in `ProfileVectorRequest` / `MultiVectorRequest` with 
 - *Win*: Standard "coarse-then-fine" ANN pattern; gives sub-200 ms p95 search latency with millions of venues.
 - *Risk*: Premature until the venue corpus is large enough to matter. RaBitQ via pgvector extensions is a probably-equivalent alternative that's already battle-tested.
 
+### Tier 1.5 — LLM-shaped workloads (this is where the *headline* TurboQuant claim actually pays off)
+
+Tidepool has an LLM hook **scaffolded but not yet operational**: `TasteSummaryController.swift:99` is wired to call **Claude Haiku 4.5** via the Anthropic API (`model: claude-haiku-4-5-20251001`) to generate a 2–3 sentence taste profile, the route is registered (`routes.swift:25`), and `BackendClient.getTasteSummary()` exists on the client side. But the controller falls back to a static string ("You enjoy X, Y, Z spots.") when `ANTHROPIC_API_KEY` is unset (lines 55–64), and the iOS call site doesn't appear to be triggered from the UI yet. Read this as **intent, not production traffic**. The SPEC also reserves space for sentence-transformer / E5-class embedding models (on-device Core ML or server-hosted).
+
+This is where TurboQuant's marquee KV-cache result becomes directly relevant — but **only on inference paths we control**. A clean taxonomy:
+
+| Path | Who runs inference | TurboQuant applies? |
+|---|---|---|
+| Hosted Anthropic API (today's taste summary) | Anthropic | ❌ — KV-cache quantization is a runtime feature; we'd need Anthropic to offer it. We'd save nothing on our side. |
+| Self-hosted server LLM (vLLM / TGI for re-ranking, summaries, conversational search) | Us, on GPU | ✅ — community vLLM port exists (`0xSero/turboquant`). 3.5 bits/channel ≈ 4× KV reduction at quality parity. |
+| On-device LLM via Apple Foundation Models / Core ML / llama.cpp | iPhone | ✅ ✅ — RAM is *the* binding constraint on iPhone; 4–6× KV compression is the difference between "works at 8K context" and "works at 32K." Direct fit. |
+| Offline batch (tag-graph generation, teacher labels for the relatedness matrix in `SPEC.md:198`) | Us, occasionally | Mild — KV compression helps throughput and context length per batch run. |
+
+**Concrete LLM features that benefit:**
+
+**G. On-device taste summaries.** Move `TasteSummaryController` from Anthropic API to Apple Foundation Models (iOS 18.1+) for the privacy story. The user's full interest history (favorites, top genres, visit patterns) is the prompt context, which gets long fast. TurboQuant'd KV cache lets a 3B-class on-device model accept that whole context.
+
+**H. Conversational place search.** "Find me a quiet place with good coffee, somewhere I haven't been, that fits my vibe." Prompt context = interest vector summary + last-N visits + candidate venues from HNSW retrieval + venue descriptions. That's easily 4–8K tokens of context. With TurboQuant on a self-hosted small LLM, this fits cheaply. Slots into the existing `/v1/search/places` endpoint.
+
+**I. Personalized venue blurbs.** Server-side, cached per (user, place) — "why this fits you." Self-hosted small model + TurboQuant KV compression gives more parallel generations per GPU.
+
+**J. LLM-as-reranker.** ANN gives top-200 candidates, an LLM re-ranks the top-50 with structured venue features. KV cache compression matters here because the per-request context is huge (50 candidates × structured fields). This is a clean replacement for/augmentation of the cosine-only ranking in `SearchController.swift`.
+
+**K. Tag-graph teacher labels.** The SPEC's offline pipeline (`SPEC.md:194-204`) needs an LLM to score tag pairs for the relatedness matrix. Standard batch inference workload; TurboQuant lowers cost.
+
+**Why this changes the calculus:**
+The §5 conclusion in the original draft said "the KV-cache use case doesn't apply to Tidepool." That was wrong as a forward-looking claim. The moment Tidepool runs *any* inference we control — server-side or on-device — the KV-cache result becomes the **single most valuable part of the paper**, more than the embedding-compression piece. On-device especially: Apple's Foundation Models + a TurboQuant'd KV cache is plausibly the unlock for "smart, private recommendations on iPhone with no server LLM call at all."
+
+**Caveats specific to LLM paths:**
+- Anthropic API path is locked out — they'd have to ship it.
+- Apple Foundation Models are sandboxed; we can't customize their KV cache. So this benefit only materializes if we run our own model (llama.cpp / MLX / Core ML) on-device.
+- Self-hosted server LLM means new infra. Worth it only if at least two of features G–J ship.
+
 ### Tier 3 — Speculative
 
 **E. Differential-privacy interaction.**
@@ -140,11 +173,13 @@ The roadmap calls for an `embedding_matrix.npy` shipped in-app (`SPEC.md:202`). 
 
 ## 5. Bottom line
 
-TurboQuant is a **promising but contested** scalar/JL hybrid for vector compression. Its **unique selling point for Tidepool is the all-pairs cosine sweep in `TidepoolComputeService`** — that's an O(N²) loop over float32 unit vectors, which is exactly the workload bit-quantization was designed for and it lives entirely on our side of the API contract. Storage and HNSW recall are the secondary win.
+TurboQuant is a **promising but contested** scalar/JL hybrid for vector compression. For Tidepool, two distinct value stories:
 
-The KV-cache use case (the headline reason for the blog post) **doesn't apply to Tidepool** — we don't run LLM inference; the LLM-shaped work in our SPEC is offline tag-graph generation.
+1. **Today's pipeline (vector path).** The all-pairs cosine sweep in `TidepoolComputeService.computeAllTidepools` and the multi-vector pgvector HNSW indices are the immediate beneficiaries of the embedding-compression half of the paper. Lowest-friction win, fully on our side of the API. **Benchmark TurboQuant head-to-head against RaBitQ + pgvector first** — RaBitQ is more mature, has stronger published guarantees, and may be a drop-in pgvector extension. TurboQuant's edge over RaBitQ is currently disputed.
 
-Before adopting TurboQuant specifically, **benchmark it head-to-head against RaBitQ + pgvector**, since RaBitQ is more mature, has stronger published guarantees, and may be a drop-in pgvector extension. TurboQuant's edge over RaBitQ is currently disputed in the literature.
+2. **Future LLM features (KV-cache path).** The headline 6× KV-cache compression result becomes valuable the moment Tidepool runs LLM inference *we control*. The existing `TasteSummaryController` hook targets the Anthropic API and isn't operational anyway — even when it lights up, KV quantization is a runtime concern at the inference engine, so it gives Tidepool nothing on a hosted-API path. The interesting branches are: (a) self-hosted server model for conversational search / re-ranking / personalized blurbs (vLLM with TurboQuant), and (b) on-device via llama.cpp / MLX / a custom Core ML model. On-device is the most exciting case: it's the difference between a recommendation chatbot that actually fits in iPhone RAM at usable context lengths and one that doesn't. **None of this is committed roadmap — it's the design space TurboQuant unlocks if/when we go that direction.**
+
+The right framing: TurboQuant's two halves map to two separate roadmap bets. The vector half is a **near-term efficiency win**; the KV half is a **strategic enabler for any controlled LLM inference** Tidepool decides to run.
 
 ---
 
