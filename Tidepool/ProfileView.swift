@@ -26,14 +26,14 @@ struct ProfileView: View {
     @State private var showingPlaceSearch = false
     @State private var showingBirthdayPicker = false
     @State private var tempBirthday: Date = Calendar.current.date(byAdding: .year, value: -25, to: Date()) ?? Date()
-    @State private var visitPatterns: [VisitPattern] = []
     @State private var recentVisits: [VisitReport] = []
     @State private var isLoadingVisits = false
-    @State private var pendingVisitCount: Int = 0
-    @State private var showingPendingVisits = false
+    @State private var pendingVersion: Int = 0
     @State private var showingAddHiddenPlace = false
-    @State private var showingPhotoPlaces = false
-    @State private var selectedVisitIndex: Int? = nil
+    @State private var showingInsights = false
+    @State private var showingCheckInsList = false
+    @State private var initialCheckInDetail: CheckInItem? = nil
+    @State private var activeIntegrationMenu: ActiveIntegrationMenu? = nil
     @AppStorage("home_address") private var homeAddress: String = ""
     @AppStorage("hidden_places_data") private var hiddenPlacesData: Data = Data()
 
@@ -80,9 +80,44 @@ struct ProfileView: View {
             }
             .padding(.horizontal, 16)
             .padding(.top, 8)
-            .padding(.bottom, 40)
+            .padding(.bottom, 4)
         }
         .background(Color(UIColor.systemGroupedBackground))
+        .overlayPreferenceValue(IntegrationCardBoundsKey.self) { anchors in
+            GeometryReader { geom in
+                if let menu = activeIntegrationMenu, let anchor = anchors[menu.id] {
+                    let rect = geom[anchor]
+                    let spacing: CGFloat = 8
+                    let popupHeight: CGFloat = 92
+                    let placeBelow = rect.maxY + spacing + popupHeight < geom.size.height
+                    let popupY = placeBelow ? rect.maxY + spacing : rect.minY - spacing - popupHeight
+
+                    ZStack(alignment: .topLeading) {
+                        Color.black.opacity(0.0001)
+                            .ignoresSafeArea()
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                withAnimation(.bouncy(duration: 0.28, extraBounce: 0.35)) {
+                                    activeIntegrationMenu = nil
+                                }
+                            }
+                            .transition(.opacity)
+
+                        IntegrationActionsPopup(menu: menu) {
+                            withAnimation(.bouncy(duration: 0.28, extraBounce: 0.35)) {
+                                activeIntegrationMenu = nil
+                            }
+                        }
+                        .frame(width: rect.width, height: popupHeight)
+                        .offset(x: rect.minX, y: popupY)
+                        .transition(
+                            .scale(scale: 0.6, anchor: placeBelow ? .top : .bottom)
+                                .combined(with: .opacity)
+                        )
+                    }
+                }
+            }
+        }
     }
 
     @ToolbarContentBuilder
@@ -125,22 +160,46 @@ struct ProfileView: View {
     }
 
     private func loadVisitData() {
-        pendingVisitCount = VisitDetector.shared.pendingVisits.count
+        pendingVersion &+= 1
 
         guard BackendClient.shared.isAuthenticated else { return }
         isLoadingVisits = true
         Task {
             do {
-                async let patternsTask = BackendClient.shared.getVisitPatterns()
-                async let recentTask = BackendClient.shared.getRecentVisits(limit: 50)
-                let (patternsResult, recentResult) = try await (patternsTask, recentTask)
-                visitPatterns = patternsResult.patterns
-                recentVisits = recentResult
+                recentVisits = try await BackendClient.shared.getRecentVisits(limit: 50)
             } catch {
                 print("[ProfileView] visit data fetch failed: \(error.localizedDescription)")
             }
             isLoadingVisits = false
         }
+    }
+
+    private var allCheckIns: [CheckInItem] {
+        _ = pendingVersion // re-evaluate when pending changes
+        let iso = ISO8601DateFormatter()
+        var items: [CheckInItem] = []
+
+        for (i, v) in VisitDetector.shared.pendingVisits.enumerated() {
+            let d = iso.date(from: v.arrivedAt) ?? Date.distantPast
+            items.append(CheckInItem(
+                id: "p_\(v.arrivedAt)_\(v.name)",
+                visit: v,
+                isPending: true,
+                date: d,
+                pendingIndex: i
+            ))
+        }
+        for v in recentVisits {
+            let d = iso.date(from: v.arrivedAt) ?? Date.distantPast
+            items.append(CheckInItem(
+                id: "s_\(v.arrivedAt)_\(v.name)",
+                visit: v,
+                isPending: false,
+                date: d,
+                pendingIndex: nil
+            ))
+        }
+        return items.sorted { $0.date > $1.date }
     }
 
     // MARK: - Location Section
@@ -564,16 +623,6 @@ struct ProfileView: View {
         }
     }
 
-    // MARK: - Privacy Section
-
-    @ViewBuilder
-    private var privacySection: some View {
-        Section(header: Text("Privacy"), footer: Text("We never show your exact location or identity to others. Presence near Home (within 500 ft) is never shared.")) {
-            Label("Anonymous presence only", systemImage: "shield.lefthalf.filled")
-            Label("K-anonymity & DP on aggregates", systemImage: "checkerboard.shield")
-        }
-    }
-
     // MARK: - Card Components
 
     private var integrationsCard: some View {
@@ -600,7 +649,8 @@ struct ProfileView: View {
                     showingBirthdayPicker = true
                 } label: {
                     HStack(spacing: 12) {
-                        Image(systemName: "birthday.cake.fill")
+                        Image("birthday")
+                            .scaleEffect(2.0)
                             .font(.system(size: 16, weight: .semibold))
                             .foregroundStyle(.white)
                             .frame(width: 38, height: 38)
@@ -643,47 +693,70 @@ struct ProfileView: View {
                 favoritesIntegrationCard()
 
                 // Spotify
-                tappableIntegrationCard(
-                    icon: "waveform", title: "Spotify", tint: .green,
+                IntegrationCardView(
+                    id: "spotify",
+                    icon: "spotify", title: "Spotify", tint: .green,
                     isConnected: spotifyManager.isConnected,
                     isSyncing: spotifyManager.isConnected && spotifyManager.isSyncing,
                     summary: spotifyManager.getSummary(),
-                    tags: vectorManager?.getSourceInsights().first(where: { $0.name == "Spotify" })?.topTags ?? [],
                     onConnect: { Task { await spotifyManager.authenticate() } },
                     onRefresh: { Task { await spotifyManager.refreshData() } },
-                    onDisconnect: { spotifyManager.disconnect() }
+                    onDisconnect: { spotifyManager.disconnect() },
+                    activeMenu: $activeIntegrationMenu
                 )
 
                 // Apple Music
-                tappableIntegrationCard(
-                    icon: "music.note", title: "Apple Music", tint: .red,
+                IntegrationCardView(
+                    id: "appleMusic",
+                    icon: "apple-music", title: "Apple Music", tint: .red,
                     isConnected: appleMusicManager.isAuthorized,
                     isSyncing: appleMusicManager.isAuthorized && appleMusicManager.isSyncing,
                     summary: appleMusicManager.getSummary(),
-                    tags: vectorManager?.getSourceInsights().first(where: { $0.name == "Apple Music" })?.topTags ?? [],
                     onConnect: { Task { await appleMusicManager.requestAuthorization() } },
                     onRefresh: { Task { await appleMusicManager.refreshData() } },
-                    onDisconnect: { appleMusicManager.disconnect() }
+                    onDisconnect: { appleMusicManager.disconnect() },
+                    activeMenu: $activeIntegrationMenu
                 )
 
                 // Photos
-                tappableIntegrationCard(
-                    icon: "photo.fill", title: "Photos", tint: .orange,
+                IntegrationCardView(
+                    id: "photos",
+                    icon: "image", title: "Photos", tint: .orange,
                     isConnected: photosManager.isEnabled,
                     isSyncing: photosManager.isEnabled && photosManager.isProcessing,
                     summary: photosManager.getPlacesSummary(),
-                    tags: vectorManager?.getSourceInsights().first(where: { $0.name == "Photos" })?.topTags ?? [],
                     onConnect: { connectPhotos() },
                     onRefresh: { Task { await photosManager.refreshData() } },
                     onDisconnect: { disconnectPhotos() },
-                    onDonutTap: { showingPhotoPlaces = true }
+                    activeMenu: $activeIntegrationMenu
                 )
-                .sheet(isPresented: $showingPhotoPlaces) {
-                    PhotoPlacesSheet(photosManager: photosManager)
-                }
             }
             .padding(.horizontal, 16)
-            .padding(.bottom, 20)
+            .padding(.bottom, 12)
+
+            // View Insights link
+            if let vectorManager {
+                Button { showingInsights = true } label: {
+                    HStack(spacing: 6) {
+                        Text("View Insights")
+                            .font(.subheadline)
+                            .fontWeight(.semibold)
+                        Image(systemName: "chevron.right")
+                            .font(.caption2)
+                            .fontWeight(.bold)
+                    }
+                    .foregroundStyle(.blue)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 16)
+                .padding(.bottom, 12)
+                .sheet(isPresented: $showingInsights) {
+                    InterestInsightsDetailView(vectorManager: vectorManager, photosManager: photosManager)
+                }
+            }
         }
         .background(.regularMaterial)
         .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
@@ -692,7 +765,7 @@ struct ProfileView: View {
 
     private func integrationPill<T: View>(icon: String, title: String, tint: Color, @ViewBuilder trailing: () -> T) -> some View {
         HStack(spacing: 12) {
-            Image(systemName: icon)
+            AdaptiveSymbol(name: icon)
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundStyle(.white)
                 .frame(width: 38, height: 38)
@@ -714,175 +787,53 @@ struct ProfileView: View {
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 
-    /// Integration card where tapping the header triggers connect or shows a menu.
-    private func tappableIntegrationCard(
-        icon: String, title: String, tint: Color,
-        isConnected: Bool, isSyncing: Bool = false,
-        summary: String?, tags: [InterestVectorManager.TagWeight],
-        onConnect: @escaping () -> Void,
-        onRefresh: @escaping () -> Void,
-        onDisconnect: @escaping () -> Void,
-        onDonutTap: (() -> Void)? = nil
-    ) -> some View {
-        VStack(spacing: 0) {
-            // Header row — always visible, never replaced by Menu label
+
+    /// Favorites card — plus button to add, tapping header opens favorites list
+    private func favoritesIntegrationCard() -> some View {
+        Button { showingFavorites = true } label: {
             HStack(spacing: 12) {
-                Image(systemName: icon)
+                Image(systemName: "star.fill")
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(.white)
                     .frame(width: 38, height: 38)
-                    .background(tint.gradient)
+                    .background(Color.yellow.gradient)
                     .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
-                    .shadow(color: tint.opacity(0.3), radius: 4, y: 2)
+                    .shadow(color: .yellow.opacity(0.3), radius: 4, y: 2)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(title)
+                    Text("Favorites")
                         .font(.subheadline)
                         .fontWeight(.semibold)
-                    if let summary, isConnected {
-                        Text(summary)
+                        .foregroundStyle(.primary)
+                    if !favoritesManager.favorites.isEmpty {
+                        Text("\(favoritesManager.favorites.count) places")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
-                            .lineLimit(1)
                     }
                 }
 
                 Spacer()
 
-                if isSyncing {
-                    ProgressView()
-                        .controlSize(.small)
+                Button { showingPlaceSearch = true } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(.white)
                         .frame(width: 28, height: 28)
-                } else if isConnected {
-                    // Checkmark with invisible Menu overlay so it never disappears
-                    ZStack {
-                        Image(systemName: "checkmark")
-                            .font(.system(size: 12, weight: .bold))
-                            .foregroundStyle(.white)
-                            .frame(width: 28, height: 28)
-                            .background(
-                                LinearGradient(colors: [.green, .mint], startPoint: .topLeading, endPoint: .bottomTrailing)
-                            )
-                            .clipShape(Circle())
-                            .shadow(color: .green.opacity(0.3), radius: 4, y: 2)
-
-                        Menu {
-                            Button { onRefresh() } label: {
-                                Label("Refresh Data", systemImage: "arrow.clockwise")
-                            }
-                            Divider()
-                            Button(role: .destructive) { onDisconnect() } label: {
-                                Label("Disconnect", systemImage: "xmark.circle")
-                            }
-                        } label: {
-                            Color.clear.frame(width: 28, height: 28)
-                        }
-                    }
-                } else {
-                    Button { onConnect() } label: {
-                        Text("Connect")
-                            .font(.caption)
-                            .fontWeight(.bold)
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 8)
-                            .background(
-                                LinearGradient(colors: [.blue, .cyan], startPoint: .leading, endPoint: .trailing)
-                            )
-                            .clipShape(Capsule())
-                            .shadow(color: .blue.opacity(0.25), radius: 4, y: 2)
-                    }
-                    .buttonStyle(.plain)
+                        .background(
+                            LinearGradient(colors: [.blue, .cyan], startPoint: .topLeading, endPoint: .bottomTrailing)
+                        )
+                        .clipShape(Circle())
+                        .shadow(color: .blue.opacity(0.3), radius: 4, y: 2)
                 }
+                .buttonStyle(.plain)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
-
-            // Inline donut chart or skeleton
-            if isConnected && !tags.isEmpty && !isSyncing {
-                Divider()
-                    .padding(.horizontal, 16)
-                if let onDonutTap {
-                    Button { onDonutTap() } label: {
-                        DonutChartView(tags: tags, size: 64, lineWidth: 14)
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 12)
-                    }
-                    .buttonStyle(.plain)
-                } else {
-                    DonutChartView(tags: tags, size: 64, lineWidth: 14)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 12)
-                }
-            } else if isConnected && isSyncing {
-                Divider()
-                    .padding(.horizontal, 16)
-                DonutSkeletonView()
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 12)
-            }
+            .background(Color(UIColor.secondarySystemGroupedBackground))
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .contentShape(Rectangle())
         }
-        .background(Color(UIColor.secondarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-    }
-
-    /// Favorites card — plus button to add, tapping header opens favorites list
-    private func favoritesIntegrationCard() -> some View {
-        let tags = vectorManager?.getSourceInsights().first(where: { $0.name == "Favorites" })?.topTags ?? []
-
-        return VStack(spacing: 0) {
-            Button { showingFavorites = true } label: {
-                HStack(spacing: 12) {
-                    Image(systemName: "star.fill")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .frame(width: 38, height: 38)
-                        .background(Color.yellow.gradient)
-                        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
-                        .shadow(color: .yellow.opacity(0.3), radius: 4, y: 2)
-
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Favorites")
-                            .font(.subheadline)
-                            .fontWeight(.semibold)
-                            .foregroundStyle(.primary)
-                        if !favoritesManager.favorites.isEmpty {
-                            Text("\(favoritesManager.favorites.count) places")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-
-                    Spacer()
-
-                    Button { showingPlaceSearch = true } label: {
-                        Image(systemName: "plus")
-                            .font(.system(size: 12, weight: .bold))
-                            .foregroundStyle(.white)
-                            .frame(width: 28, height: 28)
-                            .background(
-                                LinearGradient(colors: [.blue, .cyan], startPoint: .topLeading, endPoint: .bottomTrailing)
-                            )
-                            .clipShape(Circle())
-                            .shadow(color: .blue.opacity(0.3), radius: 4, y: 2)
-                    }
-                    .buttonStyle(.plain)
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
-            }
-            .buttonStyle(.plain)
-
-            if !tags.isEmpty {
-                Divider()
-                    .padding(.horizontal, 16)
-                DonutChartView(tags: tags, size: 64, lineWidth: 14)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 12)
-            }
-        }
-        .background(Color(UIColor.secondarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .buttonStyle(.plain)
     }
 
     private var syncingBadge: some View {
@@ -930,20 +881,42 @@ struct ProfileView: View {
     }
 
     private var visitsCard: some View {
-        VStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Check-ins")
-                    .font(.title3)
-                    .fontWeight(.bold)
-                Text("Places you've visited")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+        let items = allCheckIns
+        let inlineCount = 3
+
+        return VStack(spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Check-ins")
+                        .font(.title3)
+                        .fontWeight(.bold)
+                    Text(items.isEmpty ? "Places you've visited" : "\(items.count) place\(items.count == 1 ? "" : "s") visited")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if items.count > inlineCount {
+                    Button {
+                        initialCheckInDetail = nil
+                        showingCheckInsList = true
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text("View All")
+                                .font(.caption)
+                                .fontWeight(.semibold)
+                            Image(systemName: "chevron.right")
+                                .font(.caption2)
+                                .fontWeight(.bold)
+                        }
+                        .foregroundStyle(.blue)
+                    }
+                    .buttonStyle(.plain)
+                }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 20)
             .padding(.top, 20)
 
-            if isLoadingVisits {
+            if isLoadingVisits && items.isEmpty {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
                     Text("Loading visits...")
@@ -951,9 +924,10 @@ struct ProfileView: View {
                         .foregroundStyle(.secondary)
                 }
                 .padding(.bottom, 20)
-            } else if recentVisits.isEmpty && pendingVisitCount == 0 {
+            } else if items.isEmpty {
                 VStack(spacing: 6) {
-                    Image(systemName: "mappin.and.ellipse")
+                    Image("map-pin")
+                        .scaleEffect(2.0)
                         .font(.title2)
                         .foregroundStyle(.tertiary)
                     Text("No visits detected yet")
@@ -967,236 +941,35 @@ struct ProfileView: View {
                 }
                 .padding(.bottom, 20)
             } else {
-                VStack(spacing: 8) {
-                    // Pending local visits — chronological, swipe to delete
-                    if pendingVisitCount > 0 {
-                        HStack {
-                            Text("Pending")
-                                .font(.caption)
-                                .fontWeight(.semibold)
-                                .foregroundStyle(.orange)
-                            Spacer()
-                            Button { showingPendingVisits = true } label: {
-                                HStack(spacing: 4) {
-                                    Text("Debug")
-                                        .font(.caption2)
-                                    Image(systemName: "chevron.right")
-                                        .font(.caption2)
-                                }
-                                .foregroundStyle(.tertiary)
-                            }
-                            .buttonStyle(.plain)
+                VStack(spacing: 6) {
+                    ForEach(items.prefix(inlineCount)) { item in
+                        Button {
+                            initialCheckInDetail = item
+                            showingCheckInsList = true
+                        } label: {
+                            CheckInRowView(item: item)
                         }
-                        .padding(.horizontal, 20)
-
-                        ForEach(Array(VisitDetector.shared.pendingVisits.enumerated()), id: \.offset) { i, visit in
-                            pendingVisitRow(visit, index: i)
-                        }
-                    }
-
-                    // Uploaded visits (chronological)
-                    if !recentVisits.isEmpty {
-                        if pendingVisitCount > 0 {
-                            HStack {
-                                Text("History")
-                                    .font(.caption)
-                                    .fontWeight(.semibold)
-                                    .foregroundStyle(.green)
-                                Spacer()
-                            }
-                            .padding(.horizontal, 20)
-                            .padding(.top, 4)
-                        }
-
-                        ForEach(Array(recentVisits.prefix(20).enumerated()), id: \.offset) { i, visit in
-                            uploadedVisitRow(visit, index: i)
-                        }
-
-                        if recentVisits.count > 20 {
-                            Text("+ \(recentVisits.count - 20) more")
-                                .font(.caption)
-                                .foregroundStyle(.tertiary)
-                                .padding(.bottom, 4)
-                        }
+                        .buttonStyle(.plain)
                     }
                 }
+                .padding(.horizontal, 16)
                 .padding(.bottom, 16)
             }
         }
         .background(.regularMaterial)
         .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
         .shadow(color: .cyan.opacity(0.08), radius: 12, y: 4)
-        .sheet(isPresented: $showingPendingVisits) {
-            PendingVisitsSheet(onDismiss: {
-                showingPendingVisits = false
+        .contentShape(Rectangle())
+        .onTapGesture {
+            guard !allCheckIns.isEmpty else { return }
+            initialCheckInDetail = nil
+            showingCheckInsList = true
+        }
+        .sheet(isPresented: $showingCheckInsList, onDismiss: { loadVisitData() }) {
+            CheckInsListSheet(items: allCheckIns, initialDetail: initialCheckInDetail) {
                 loadVisitData()
-            })
-        }
-        .sheet(isPresented: Binding(
-            get: { selectedVisitIndex != nil },
-            set: { if !$0 { selectedVisitIndex = nil } }
-        )) {
-            if let index = selectedVisitIndex, index < VisitDetector.shared.pendingVisits.count {
-                VisitDetailSheet(
-                    visitIndex: index,
-                    onUpdate: { loadVisitData(); pendingVisitCount = VisitDetector.shared.pendingVisits.count },
-                    onDelete: { selectedVisitIndex = nil; loadVisitData(); pendingVisitCount = VisitDetector.shared.pendingVisits.count }
-                )
             }
         }
-    }
-
-    private let visitColors: [Color] = [.cyan, .blue, .teal, .indigo, .purple, .green, .orange, .mint]
-
-    private func pendingVisitRow(_ visit: VisitReport, index: Int) -> some View {
-        let iso = ISO8601DateFormatter()
-        let date = iso.date(from: visit.arrivedAt)
-        let timeStr = date.map { RelativeDateTimeFormatter().localizedString(for: $0, relativeTo: Date()) } ?? visit.arrivedAt
-
-        return Button {
-            selectedVisitIndex = index
-        } label: {
-            HStack(spacing: 12) {
-                Image(systemName: "clock.arrow.circlepath")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 34, height: 34)
-                    .background(Color.orange.gradient)
-                    .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(visit.name)
-                        .font(.subheadline)
-                        .fontWeight(.medium)
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-
-                    HStack(spacing: 6) {
-                        Text("\(visit.durationMinutes)m")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Text(timeStr)
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
-                    }
-                }
-
-                Spacer()
-
-                Image(systemName: "chevron.right")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-            }
-        }
-        .buttonStyle(.plain)
-        .padding(.horizontal, 20)
-        .padding(.vertical, 6)
-    }
-
-    @State private var selectedUploadedVisit: VisitReport? = nil
-
-    private func uploadedVisitRow(_ visit: VisitReport, index: Int) -> some View {
-        let color = visitColors[index % visitColors.count]
-        let iso = ISO8601DateFormatter()
-        let date = iso.date(from: visit.arrivedAt)
-        let timeStr = date.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? visit.arrivedAt
-        let categoryIcon = (PlaceCategory(rawValue: visit.category.rawValue) ?? .other).iconName
-
-        return Button {
-            selectedUploadedVisit = visit
-        } label: {
-            HStack(spacing: 12) {
-                Image(systemName: categoryIcon)
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 34, height: 34)
-                    .background(color.gradient)
-                    .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(visit.name)
-                        .font(.subheadline)
-                        .fontWeight(.medium)
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-
-                    HStack(spacing: 6) {
-                        Text("\(visit.durationMinutes)m")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Text(timeStr)
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
-                    }
-                }
-
-                Spacer()
-
-                Image(systemName: "chevron.right")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-            }
-        }
-        .buttonStyle(.plain)
-        .padding(.horizontal, 20)
-        .padding(.vertical, 6)
-        .sheet(isPresented: Binding(
-            get: { selectedUploadedVisit?.arrivedAt == visit.arrivedAt },
-            set: { if !$0 { selectedUploadedVisit = nil } }
-        )) {
-            UploadedVisitDetailSheet(visit: visit)
-        }
-    }
-
-    private func visitPatternRow(_ pattern: VisitPattern, index: Int) -> some View {
-        let color = visitColors[index % visitColors.count]
-        let categoryIcon = (PlaceCategory(rawValue: pattern.category.rawValue) ?? .other).iconName
-
-        return HStack(spacing: 12) {
-            Image(systemName: categoryIcon)
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(.white)
-                .frame(width: 34, height: 34)
-                .background(color.gradient)
-                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(pattern.name)
-                    .font(.subheadline)
-                    .fontWeight(.medium)
-                    .lineLimit(1)
-
-                HStack(spacing: 6) {
-                    Text("\(pattern.visitCount) visit\(pattern.visitCount == 1 ? "" : "s")")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-
-                    if !pattern.typicalHours.isEmpty {
-                        let hourStr = pattern.typicalHours.prefix(2)
-                            .map { formatHour($0) }
-                            .joined(separator: ", ")
-                        Text("around \(hourStr)")
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
-                    }
-                }
-            }
-
-            Spacer()
-
-            Text("\(pattern.avgDurationMinutes)m")
-                .font(.caption)
-                .fontWeight(.semibold)
-                .foregroundStyle(color)
-        }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 6)
-    }
-
-    private func formatHour(_ hour: Int) -> String {
-        let h = hour % 12 == 0 ? 12 : hour % 12
-        let ampm = hour < 12 ? "am" : "pm"
-        return "\(h)\(ampm)"
     }
 
     private var favoritesCard: some View {
@@ -1296,7 +1069,7 @@ struct ProfileView: View {
             .padding(.top, 20)
 
             VStack(spacing: 8) {
-                locationSettingRow(icon: "location.fill", title: "Permission", tint: .blue) {
+                locationSettingRow(icon: "location", title: "Permission", tint: .blue) {
                     HStack(spacing: 6) {
                         Button("When In Use") { location.requestAuthorization() }
                             .font(.caption2)
@@ -1463,7 +1236,7 @@ struct ProfileView: View {
 
     private func locationSettingRow<T: View>(icon: String, title: String, tint: Color, @ViewBuilder trailing: () -> T) -> some View {
         HStack(spacing: 12) {
-            Image(systemName: icon)
+            AdaptiveSymbol(name: icon)
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(.white)
                 .frame(width: 32, height: 32)
@@ -1507,70 +1280,23 @@ struct ProfileView: View {
     }
 
     private var privacyCard: some View {
-        VStack(spacing: 10) {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Privacy")
+                .font(.footnote)
+                .fontWeight(.semibold)
+                .foregroundStyle(.secondary)
+
             VStack(alignment: .leading, spacing: 4) {
-                Text("Privacy")
-                    .font(.title3)
-                    .fontWeight(.bold)
-                Text("Your data stays yours")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Text("Tidepool is fully anonymous — no accounts, identity, or tracking.")
+                Text("Your home location stays hidden within 500 feet, and everything is encrypted in transit.")
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 20)
-            .padding(.top, 20)
-
-            VStack(spacing: 8) {
-                privacyBadge(
-                    icon: "shield.lefthalf.filled",
-                    tint: .green,
-                    title: "Fully anonymous",
-                    subtitle: "No accounts, no identity, no tracking"
-                )
-                privacyBadge(
-                    icon: "eye.slash.fill",
-                    tint: .blue,
-                    title: "Home protected",
-                    subtitle: "Presence hidden within 500 ft of home"
-                )
-                privacyBadge(
-                    icon: "lock.fill",
-                    tint: .purple,
-                    title: "Encrypted in transit",
-                    subtitle: "All data encrypted between device and server"
-                )
-            }
-            .padding(.horizontal, 16)
-            .padding(.bottom, 20)
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            .multilineTextAlignment(.leading)
         }
-        .background(.regularMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
-        .shadow(color: .green.opacity(0.06), radius: 12, y: 4)
-    }
-
-    private func privacyBadge(icon: String, tint: Color, title: String, subtitle: String) -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: icon)
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(.white)
-                .frame(width: 32, height: 32)
-                .background(tint.gradient)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.subheadline)
-                    .fontWeight(.medium)
-                Text(subtitle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .background(Color(UIColor.secondarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 24)
+        .padding(.vertical, 12)
     }
 
     // MARK: - Actions
@@ -1597,6 +1323,166 @@ struct ProfileView: View {
 
         // Add haptic feedback
         HapticFeedbackManager.shared.impact(.light)
+    }
+}
+
+/// Bounds of each integration card (in a coordinate space named "integrationsArea"),
+/// used to anchor the active popup at the parent level so a screen-wide scrim can dismiss it.
+struct IntegrationCardBoundsKey: PreferenceKey {
+    static var defaultValue: [String: Anchor<CGRect>] = [:]
+    static func reduce(value: inout [String: Anchor<CGRect>], nextValue: () -> [String: Anchor<CGRect>]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, new in new })
+    }
+}
+
+struct ActiveIntegrationMenu: Equatable {
+    let id: String
+    let title: String
+    let onRefresh: () -> Void
+    let onDisconnect: () -> Void
+
+    static func == (lhs: ActiveIntegrationMenu, rhs: ActiveIntegrationMenu) -> Bool {
+        lhs.id == rhs.id
+    }
+}
+
+/// Integration card: tap anywhere → connect (when disconnected) or set parent's active menu (when connected).
+/// The popup itself is rendered by the parent so a screen-wide scrim can intercept outside taps.
+struct IntegrationCardView: View {
+    let id: String
+    let icon: String
+    let title: String
+    let tint: Color
+    let isConnected: Bool
+    let isSyncing: Bool
+    let summary: String?
+    let onConnect: () -> Void
+    let onRefresh: () -> Void
+    let onDisconnect: () -> Void
+    @Binding var activeMenu: ActiveIntegrationMenu?
+
+    var body: some View {
+        Button {
+            if isConnected {
+                let menu = ActiveIntegrationMenu(
+                    id: id, title: title,
+                    onRefresh: onRefresh, onDisconnect: onDisconnect
+                )
+                withAnimation(.bouncy(duration: 0.28, extraBounce: 0.35)) {
+                    activeMenu = (activeMenu?.id == id) ? nil : menu
+                }
+            } else {
+                onConnect()
+            }
+        } label: {
+            cardRow
+        }
+        .buttonStyle(.plain)
+        .anchorPreference(key: IntegrationCardBoundsKey.self, value: .bounds) { [id: $0] }
+    }
+
+    private var cardRow: some View {
+        HStack(spacing: 12) {
+            AdaptiveSymbol(name: icon)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 38, height: 38)
+                .background(tint.gradient)
+                .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                .shadow(color: tint.opacity(0.3), radius: 4, y: 2)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(.primary)
+                if let summary, isConnected {
+                    Text(summary)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+
+            Spacer()
+
+            if isSyncing {
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(width: 28, height: 28)
+            } else if isConnected {
+                Image(systemName: "checkmark")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 28, height: 28)
+                    .background(
+                        LinearGradient(colors: [.green, .mint], startPoint: .topLeading, endPoint: .bottomTrailing)
+                    )
+                    .clipShape(Circle())
+                    .shadow(color: .green.opacity(0.3), radius: 4, y: 2)
+            } else {
+                Text("Connect")
+                    .font(.caption)
+                    .fontWeight(.bold)
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(
+                        LinearGradient(colors: [.blue, .cyan], startPoint: .leading, endPoint: .trailing)
+                    )
+                    .clipShape(Capsule())
+                    .shadow(color: .blue.opacity(0.25), radius: 4, y: 2)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(Color(UIColor.secondarySystemGroupedBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .contentShape(Rectangle())
+    }
+
+}
+
+/// Popup rendered by the parent over the active integration card.
+/// Owns its own dismiss-on-action behavior so the parent only needs to pass the data.
+struct IntegrationActionsPopup: View {
+    let menu: ActiveIntegrationMenu
+    let onDismiss: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            popupItem(label: "Refresh Data", icon: "arrow.clockwise") {
+                menu.onRefresh()
+            }
+            Divider()
+            popupItem(label: "Disconnect", icon: "xmark.circle", isDestructive: true) {
+                menu.onDisconnect()
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .background(.regularMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .shadow(color: .black.opacity(0.18), radius: 16, y: 6)
+    }
+
+    private func popupItem(label: String, icon: String, isDestructive: Bool = false, action: @escaping () -> Void) -> some View {
+        Button {
+            onDismiss()
+            action()
+        } label: {
+            HStack {
+                Text(label)
+                    .font(.subheadline)
+                Spacer()
+                Image(systemName: icon)
+                    .font(.subheadline)
+            }
+            .foregroundStyle(isDestructive ? Color.red : Color.primary)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -1880,128 +1766,467 @@ struct BirthdayPickerSheet: View {
     }
 }
 
-// MARK: - Pending Visits Debug Sheet
+// MARK: - Check-in unified list
 
-struct PendingVisitsSheet: View {
-    let onDismiss: () -> Void
-    private let detector = VisitDetector.shared
-    private let iso = ISO8601DateFormatter()
+struct CheckInItem: Identifiable, Hashable {
+    let id: String
+    let visit: VisitReport
+    let isPending: Bool
+    let date: Date
+    let pendingIndex: Int?
+
+    func hash(into hasher: inout Hasher) { hasher.combine(id) }
+    static func == (a: CheckInItem, b: CheckInItem) -> Bool { a.id == b.id }
+}
+
+struct CheckInRowView: View {
+    let item: CheckInItem
+
+    private var timeStr: String {
+        let iso = ISO8601DateFormatter()
+        guard let date = iso.date(from: item.visit.arrivedAt) else { return item.visit.arrivedAt }
+        if item.isPending {
+            return RelativeDateTimeFormatter().localizedString(for: date, relativeTo: Date())
+        }
+        return date.formatted(date: .abbreviated, time: .shortened)
+    }
 
     var body: some View {
-        NavigationView {
-            List {
-                // Status section
-                Section("Upload Status") {
-                    if let lastDate = detector.lastUploadDate {
-                        HStack {
-                            Label("Last upload", systemImage: "checkmark.circle.fill")
-                                .foregroundStyle(.green)
-                            Spacer()
-                            Text(lastDate, style: .relative)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
+        HStack(spacing: 12) {
+            Image("map-pin")
+                .scaleEffect(2.0)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 34, height: 34)
+                .background((item.isPending ? Color.orange : Color.cyan).gradient)
+                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
 
-                    if let error = detector.lastUploadError {
-                        HStack {
-                            Label("Last error", systemImage: "exclamationmark.triangle.fill")
-                                .foregroundStyle(.red)
-                            Spacer()
-                            Text(error)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(2)
-                        }
-                    }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(item.visit.name)
+                    .font(.subheadline)
+                    .fontWeight(.medium)
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
 
-                    Button {
-                        detector.retryUpload()
-                    } label: {
-                        Label("Retry Upload Now", systemImage: "arrow.clockwise")
-                    }
-
-                    Button(role: .destructive) {
-                        detector.clearPending()
-                        onDismiss()
-                    } label: {
-                        Label("Clear Queue", systemImage: "trash")
-                    }
-                }
-
-                // Pending visits
-                Section("Pending Visits (\(detector.pendingVisits.count))") {
-                    if detector.pendingVisits.isEmpty {
-                        Text("Queue is empty")
-                            .foregroundStyle(.secondary)
-                    } else {
-                        ForEach(Array(detector.pendingVisits.enumerated()), id: \.offset) { _, visit in
-                            VStack(alignment: .leading, spacing: 6) {
-                                HStack {
-                                    Text(visit.name)
-                                        .font(.subheadline)
-                                        .fontWeight(.medium)
-                                    Spacer()
-                                    Text(visit.source)
-                                        .font(.caption2)
-                                        .fontWeight(.semibold)
-                                        .foregroundStyle(.white)
-                                        .padding(.horizontal, 6)
-                                        .padding(.vertical, 2)
-                                        .background(visit.source == "visit" ? Color.blue : (visit.source == "photo" ? Color.orange : Color.yellow))
-                                        .clipShape(Capsule())
-                                }
-
-                                HStack(spacing: 12) {
-                                    Label(visit.category.rawValue, systemImage: "tag")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-
-                                    Label(String(format: "%.4f, %.4f", visit.latitude, visit.longitude), systemImage: "location")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-
-                                HStack(spacing: 12) {
-                                    Label("\(visit.durationMinutes)m", systemImage: "clock")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-
-                                    Label("confidence: \(String(format: "%.0f%%", visit.confidence * 100))", systemImage: "gauge.medium")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-
-                                if let poiId = visit.poiId {
-                                    Text("POI: \(poiId)")
-                                        .font(.caption2)
-                                        .foregroundStyle(.tertiary)
-                                        .lineLimit(1)
-                                }
-
-                                if let yelpId = visit.yelpId {
-                                    Text("Yelp: \(yelpId)")
-                                        .font(.caption2)
-                                        .foregroundStyle(.tertiary)
-                                }
-
-                                Text(visit.arrivedAt)
-                                    .font(.caption2)
-                                    .foregroundStyle(.tertiary)
-                            }
-                            .padding(.vertical, 4)
-                        }
-                    }
+                HStack(spacing: 6) {
+                    Text("\(item.visit.durationMinutes)m")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(timeStr)
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
                 }
             }
-            .navigationTitle("Upload Queue")
+
+            Spacer()
+
+            if item.isPending {
+                Text("Pending")
+                    .font(.caption2)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(.orange)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(.orange.opacity(0.15))
+                    .clipShape(Capsule())
+            }
+
+            Image(systemName: "chevron.right")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(Color(UIColor.secondarySystemGroupedBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .contentShape(Rectangle())
+    }
+}
+
+enum CheckInRoute: Hashable {
+    case detail(String)
+    case debug
+}
+
+struct CheckInsListSheet: View {
+    let items: [CheckInItem]
+    let initialDetail: CheckInItem?
+    let onChange: () -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var path: [CheckInRoute] = []
+
+    var body: some View {
+        NavigationStack(path: $path) {
+            ScrollView {
+                VStack(spacing: 6) {
+                    ForEach(items) { item in
+                        Button {
+                            path.append(.detail(item.id))
+                        } label: {
+                            CheckInRowView(item: item)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+            }
+            .background(Color(UIColor.systemGroupedBackground))
+            .navigationTitle("Check-ins")
             .navigationBarTitleDisplayMode(.inline)
+            .navigationDestination(for: CheckInRoute.self) { route in
+                switch route {
+                case .detail(let id):
+                    if let item = items.first(where: { $0.id == id }) {
+                        CheckInDetailView(
+                            item: item,
+                            onChange: onChange,
+                            onDelete: { onChange(); path.removeLast() }
+                        )
+                    }
+                case .debug:
+                    PendingQueueDebugView(onChange: onChange)
+                }
+            }
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    if items.contains(where: { $0.isPending }) {
+                        Button { path.append(.debug) } label: {
+                            Text("Debug")
+                                .font(.subheadline)
+                        }
+                    }
+                }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") { onDismiss() }
+                    Button("Done") { dismiss() }
                 }
             }
         }
+        .onAppear {
+            if let initial = initialDetail {
+                path = [.detail(initial.id)]
+            }
+        }
+    }
+}
+
+struct CheckInDetailView: View {
+    let item: CheckInItem
+    let onChange: () -> Void
+    let onDelete: () -> Void
+
+    @State private var showingRelink = false
+    @StateObject private var searchCompleter = PlaceSearchCompleter()
+    @State private var searchText = ""
+    @State private var suppressNextChange = false
+
+    private var visit: VisitReport { item.visit }
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 16) {
+                Map(initialPosition: .region(MKCoordinateRegion(
+                    center: CLLocationCoordinate2D(latitude: visit.latitude, longitude: visit.longitude),
+                    span: MKCoordinateSpan(latitudeDelta: 0.003, longitudeDelta: 0.003)
+                ))) {
+                    Marker(visit.name, coordinate: CLLocationCoordinate2D(latitude: visit.latitude, longitude: visit.longitude))
+                        .tint(item.isPending ? .orange : .green)
+                }
+                .frame(height: 200)
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        Text(visit.name)
+                            .font(.title3)
+                            .fontWeight(.bold)
+                        Spacer()
+                        Text(item.isPending ? "Pending" : "Synced")
+                            .font(.caption2)
+                            .fontWeight(.semibold)
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(item.isPending ? Color.orange : Color.green)
+                            .clipShape(Capsule())
+                    }
+
+                    HStack(spacing: 16) {
+                        Label(visit.category.rawValue, systemImage: "tag")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                        Label("\(visit.durationMinutes) min", systemImage: "clock")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    let iso = ISO8601DateFormatter()
+                    if let date = iso.date(from: visit.arrivedAt) {
+                        Label(date.formatted(date: .abbreviated, time: .shortened), systemImage: "calendar")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Label(String(format: "%.5f, %.5f", visit.latitude, visit.longitude), systemImage: "location")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+
+                    if item.isPending {
+                        Label("Confidence: \(Int(visit.confidence * 100))%", systemImage: "gauge.medium")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .padding(16)
+                .background(.regularMaterial)
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+
+                if item.isPending, item.pendingIndex != nil {
+                    Button { showingRelink = true } label: {
+                        HStack {
+                            Image(systemName: "arrow.triangle.2.circlepath")
+                                .font(.subheadline)
+                            Text("Link to different place")
+                                .font(.subheadline)
+                                .fontWeight(.medium)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                        .background(Color.blue.opacity(0.1))
+                        .foregroundStyle(.blue)
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+
+                    Button {
+                        if let idx = item.pendingIndex {
+                            VisitDetector.shared.removeVisit(at: idx)
+                        }
+                        onDelete()
+                    } label: {
+                        HStack {
+                            Image(systemName: "trash")
+                                .font(.subheadline)
+                            Text("Delete check-in")
+                                .font(.subheadline)
+                                .fontWeight(.medium)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                        .background(Color.red.opacity(0.1))
+                        .foregroundStyle(.red)
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(16)
+        }
+        .background(Color(UIColor.systemGroupedBackground))
+        .navigationTitle("Check-in Detail")
+        .navigationBarTitleDisplayMode(.inline)
+        .sheet(isPresented: $showingRelink) {
+            relinkSheet
+        }
+    }
+
+    private var relinkSheet: some View {
+        NavigationView {
+            VStack(spacing: 0) {
+                HStack(spacing: 10) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    TextField("Search for the correct place...", text: $searchText)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 16, weight: .medium))
+                }
+                .padding(.horizontal, 18)
+                .padding(.vertical, 12)
+                .background(Color(UIColor.tertiarySystemFill))
+                .clipShape(Capsule())
+                .padding(.horizontal, 16)
+                .padding(.top, 16)
+
+                if !searchCompleter.suggestions.isEmpty {
+                    List {
+                        ForEach(searchCompleter.suggestions, id: \.self) { suggestion in
+                            Button {
+                                relinkToSuggestion(suggestion)
+                            } label: {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(suggestion.title)
+                                        .font(.subheadline)
+                                        .fontWeight(.medium)
+                                    if !suggestion.subtitle.isEmpty {
+                                        Text(suggestion.subtitle)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .listStyle(.plain)
+                } else {
+                    Spacer()
+                    Text("Search for the place you actually visited")
+                        .font(.subheadline)
+                        .foregroundStyle(.quaternary)
+                    Spacer()
+                }
+            }
+            .fontDesign(.rounded)
+            .navigationTitle("Re-link Place")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Cancel") { showingRelink = false }
+                }
+            }
+            .onChange(of: searchText) { _, newValue in
+                if suppressNextChange { suppressNextChange = false; return }
+                searchCompleter.search(newValue)
+            }
+            .onAppear {
+                searchCompleter.updateRegion(MKCoordinateRegion(
+                    center: CLLocationCoordinate2D(latitude: visit.latitude, longitude: visit.longitude),
+                    latitudinalMeters: 2000, longitudinalMeters: 2000
+                ))
+            }
+        }
+    }
+
+    private func relinkToSuggestion(_ suggestion: MKLocalSearchCompletion) {
+        guard let idx = item.pendingIndex else { return }
+
+        let request = MKLocalSearch.Request(completion: suggestion)
+        MKLocalSearch(request: request).start { response, _ in
+            guard let mapItem = response?.mapItems.first else { return }
+
+            let newName = mapItem.name ?? suggestion.title
+            let newCoord = mapItem.placemark.location?.coordinate ?? CLLocationCoordinate2D(latitude: visit.latitude, longitude: visit.longitude)
+            let newCategory = PlaceCategory.from(mapItem: mapItem)
+
+            let updated = VisitReport(
+                poiId: FavoriteLocation.stablePlaceId(name: newName, coordinate: newCoord),
+                yelpId: visit.yelpId,
+                name: newName,
+                category: TidepoolShared.PlaceCategory(rawValue: newCategory.rawValue) ?? .other,
+                latitude: newCoord.latitude,
+                longitude: newCoord.longitude,
+                arrivedAt: visit.arrivedAt,
+                departedAt: visit.departedAt,
+                dayOfWeek: visit.dayOfWeek,
+                hourOfDay: visit.hourOfDay,
+                durationMinutes: visit.durationMinutes,
+                confidence: 1.0,
+                source: visit.source
+            )
+
+            VisitDetector.shared.updateVisit(at: idx, with: updated)
+            onChange()
+            showingRelink = false
+        }
+    }
+}
+
+struct PendingQueueDebugView: View {
+    let onChange: () -> Void
+    private let detector = VisitDetector.shared
+
+    var body: some View {
+        List {
+            Section("Upload Status") {
+                if let lastDate = detector.lastUploadDate {
+                    HStack {
+                        Label("Last upload", systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                        Spacer()
+                        Text(lastDate, style: .relative)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if let error = detector.lastUploadError {
+                    HStack {
+                        Label("Last error", systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.red)
+                        Spacer()
+                        Text(error)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
+                }
+
+                Button {
+                    detector.retryUpload()
+                } label: {
+                    Label("Retry Upload Now", systemImage: "arrow.clockwise")
+                }
+
+                Button(role: .destructive) {
+                    detector.clearPending()
+                    onChange()
+                } label: {
+                    Label("Clear Queue", systemImage: "trash")
+                }
+            }
+
+            Section("Pending Visits (\(detector.pendingVisits.count))") {
+                if detector.pendingVisits.isEmpty {
+                    Text("Queue is empty")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(Array(detector.pendingVisits.enumerated()), id: \.offset) { _, visit in
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Text(visit.name)
+                                    .font(.subheadline)
+                                    .fontWeight(.medium)
+                                Spacer()
+                                Text(visit.source)
+                                    .font(.caption2)
+                                    .fontWeight(.semibold)
+                                    .foregroundStyle(.white)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(visit.source == "visit" ? Color.blue : (visit.source == "photo" ? Color.orange : Color.yellow))
+                                    .clipShape(Capsule())
+                            }
+
+                            HStack(spacing: 12) {
+                                Label(visit.category.rawValue, systemImage: "tag")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Label(String(format: "%.4f, %.4f", visit.latitude, visit.longitude), systemImage: "location")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            HStack(spacing: 12) {
+                                Label("\(visit.durationMinutes)m", systemImage: "clock")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Label("confidence: \(String(format: "%.0f%%", visit.confidence * 100))", systemImage: "gauge.medium")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            Text(visit.arrivedAt)
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+            }
+        }
+        .navigationTitle("Upload Queue")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }
 
@@ -2214,317 +2439,6 @@ struct PhotoPlacesSheet: View {
     }
 }
 
-// MARK: - Uploaded Visit Detail Sheet
-
-struct UploadedVisitDetailSheet: View {
-    let visit: VisitReport
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        NavigationView {
-            ScrollView {
-                VStack(spacing: 16) {
-                    // Mini map
-                    Map(initialPosition: .region(MKCoordinateRegion(
-                        center: CLLocationCoordinate2D(latitude: visit.latitude, longitude: visit.longitude),
-                        span: MKCoordinateSpan(latitudeDelta: 0.003, longitudeDelta: 0.003)
-                    ))) {
-                        Marker(visit.name, coordinate: CLLocationCoordinate2D(latitude: visit.latitude, longitude: visit.longitude))
-                            .tint(.green)
-                    }
-                    .frame(height: 200)
-                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-
-                    // Info card
-                    VStack(alignment: .leading, spacing: 12) {
-                        HStack {
-                            Text(visit.name)
-                                .font(.title3)
-                                .fontWeight(.bold)
-                            Spacer()
-                            Text("Synced")
-                                .font(.caption2)
-                                .fontWeight(.semibold)
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 3)
-                                .background(Color.green)
-                                .clipShape(Capsule())
-                        }
-
-                        HStack(spacing: 16) {
-                            Label(visit.category.rawValue, systemImage: "tag")
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
-                            Label("\(visit.durationMinutes) min", systemImage: "clock")
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
-                        }
-
-                        let iso = ISO8601DateFormatter()
-                        if let date = iso.date(from: visit.arrivedAt) {
-                            Label(date.formatted(date: .abbreviated, time: .shortened), systemImage: "calendar")
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
-                        }
-
-                        Label(String(format: "%.5f, %.5f", visit.latitude, visit.longitude), systemImage: "location")
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
-                    }
-                    .padding(16)
-                    .background(.regularMaterial)
-                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                }
-                .padding(16)
-            }
-            .background(Color(UIColor.systemGroupedBackground))
-            .navigationTitle("Check-in Detail")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") { dismiss() }
-                }
-            }
-        }
-    }
-}
-
-// MARK: - Visit Detail Sheet
-
-struct VisitDetailSheet: View {
-    let visitIndex: Int
-    let onUpdate: () -> Void
-    let onDelete: () -> Void
-    @Environment(\.dismiss) private var dismiss
-    @StateObject private var searchCompleter = PlaceSearchCompleter()
-    @State private var searchText = ""
-    @State private var showingRelink = false
-    @State private var suppressNextChange = false
-
-    private var visit: VisitReport? {
-        guard visitIndex < VisitDetector.shared.pendingVisits.count else { return nil }
-        return VisitDetector.shared.pendingVisits[visitIndex]
-    }
-
-    var body: some View {
-        NavigationView {
-            ScrollView {
-                if let visit {
-                    VStack(spacing: 16) {
-                        // Mini map
-                        Map(initialPosition: .region(MKCoordinateRegion(
-                            center: CLLocationCoordinate2D(latitude: visit.latitude, longitude: visit.longitude),
-                            span: MKCoordinateSpan(latitudeDelta: 0.003, longitudeDelta: 0.003)
-                        ))) {
-                            Marker(visit.name, coordinate: CLLocationCoordinate2D(latitude: visit.latitude, longitude: visit.longitude))
-                                .tint(.orange)
-                        }
-                        .frame(height: 200)
-                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-
-                        // Info card
-                        VStack(alignment: .leading, spacing: 12) {
-                            HStack {
-                                Text(visit.name)
-                                    .font(.title3)
-                                    .fontWeight(.bold)
-                                Spacer()
-                                Text(visit.source)
-                                    .font(.caption2)
-                                    .fontWeight(.semibold)
-                                    .foregroundStyle(.white)
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 3)
-                                    .background(visit.source == "visit" ? Color.blue : Color.orange)
-                                    .clipShape(Capsule())
-                            }
-
-                            HStack(spacing: 16) {
-                                Label(visit.category.rawValue, systemImage: "tag")
-                                    .font(.subheadline)
-                                    .foregroundStyle(.secondary)
-                                Label("\(visit.durationMinutes) min", systemImage: "clock")
-                                    .font(.subheadline)
-                                    .foregroundStyle(.secondary)
-                            }
-
-                            let iso = ISO8601DateFormatter()
-                            if let date = iso.date(from: visit.arrivedAt) {
-                                Label(date.formatted(date: .abbreviated, time: .shortened), systemImage: "calendar")
-                                    .font(.subheadline)
-                                    .foregroundStyle(.secondary)
-                            }
-
-                            Label(String(format: "%.5f, %.5f", visit.latitude, visit.longitude), systemImage: "location")
-                                .font(.caption)
-                                .foregroundStyle(.tertiary)
-
-                            Label("Confidence: \(Int(visit.confidence * 100))%", systemImage: "gauge.medium")
-                                .font(.caption)
-                                .foregroundStyle(.tertiary)
-                        }
-                        .padding(16)
-                        .background(.regularMaterial)
-                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-
-                        // Re-link button
-                        Button { showingRelink = true } label: {
-                            HStack {
-                                Image(systemName: "arrow.triangle.2.circlepath")
-                                    .font(.subheadline)
-                                Text("Link to different place")
-                                    .font(.subheadline)
-                                    .fontWeight(.medium)
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 14)
-                            .background(Color.blue.opacity(0.1))
-                            .foregroundStyle(.blue)
-                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                        }
-                        .buttonStyle(.plain)
-
-                        // Delete button
-                        Button {
-                            VisitDetector.shared.removeVisit(at: visitIndex)
-                            onDelete()
-                        } label: {
-                            HStack {
-                                Image(systemName: "trash")
-                                    .font(.subheadline)
-                                Text("Delete check-in")
-                                    .font(.subheadline)
-                                    .fontWeight(.medium)
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 14)
-                            .background(Color.red.opacity(0.1))
-                            .foregroundStyle(.red)
-                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    .padding(16)
-                }
-            }
-            .background(Color(UIColor.systemGroupedBackground))
-            .navigationTitle("Check-in Detail")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") { dismiss() }
-                }
-            }
-            .sheet(isPresented: $showingRelink) {
-                relinkSheet
-            }
-        }
-    }
-
-    private var relinkSheet: some View {
-        NavigationView {
-            VStack(spacing: 0) {
-                HStack(spacing: 10) {
-                    Image(systemName: "magnifyingglass")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                    TextField("Search for the correct place...", text: $searchText)
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 16, weight: .medium))
-                }
-                .padding(.horizontal, 18)
-                .padding(.vertical, 12)
-                .background(Color(UIColor.tertiarySystemFill))
-                .clipShape(Capsule())
-                .padding(.horizontal, 16)
-                .padding(.top, 16)
-
-                if !searchCompleter.suggestions.isEmpty {
-                    List {
-                        ForEach(searchCompleter.suggestions, id: \.self) { suggestion in
-                            Button {
-                                relinkToSuggestion(suggestion)
-                            } label: {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(suggestion.title)
-                                        .font(.subheadline)
-                                        .fontWeight(.medium)
-                                    if !suggestion.subtitle.isEmpty {
-                                        Text(suggestion.subtitle)
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-                                    }
-                                }
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                    .listStyle(.plain)
-                } else {
-                    Spacer()
-                    Text("Search for the place you actually visited")
-                        .font(.subheadline)
-                        .foregroundStyle(.quaternary)
-                    Spacer()
-                }
-            }
-            .fontDesign(.rounded)
-            .navigationTitle("Re-link Place")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("Cancel") { showingRelink = false }
-                }
-            }
-            .onChange(of: searchText) { _, newValue in
-                if suppressNextChange { suppressNextChange = false; return }
-                searchCompleter.search(newValue)
-            }
-            .onAppear {
-                if let visit {
-                    searchCompleter.updateRegion(MKCoordinateRegion(
-                        center: CLLocationCoordinate2D(latitude: visit.latitude, longitude: visit.longitude),
-                        latitudinalMeters: 2000, longitudinalMeters: 2000
-                    ))
-                }
-            }
-        }
-    }
-
-    private func relinkToSuggestion(_ suggestion: MKLocalSearchCompletion) {
-        guard let visit else { return }
-
-        let request = MKLocalSearch.Request(completion: suggestion)
-        MKLocalSearch(request: request).start { response, _ in
-            guard let item = response?.mapItems.first else { return }
-
-            let newName = item.name ?? suggestion.title
-            let newCoord = item.placemark.location?.coordinate ?? CLLocationCoordinate2D(latitude: visit.latitude, longitude: visit.longitude)
-            let newCategory = PlaceCategory.from(mapItem: item)
-
-            let updated = VisitReport(
-                poiId: FavoriteLocation.stablePlaceId(name: newName, coordinate: newCoord),
-                yelpId: visit.yelpId,
-                name: newName,
-                category: TidepoolShared.PlaceCategory(rawValue: newCategory.rawValue) ?? .other,
-                latitude: newCoord.latitude,
-                longitude: newCoord.longitude,
-                arrivedAt: visit.arrivedAt,
-                departedAt: visit.departedAt,
-                dayOfWeek: visit.dayOfWeek,
-                hourOfDay: visit.hourOfDay,
-                durationMinutes: visit.durationMinutes,
-                confidence: 1.0,
-                source: visit.source
-            )
-
-            VisitDetector.shared.updateVisit(at: visitIndex, with: updated)
-            onUpdate()
-            showingRelink = false
-        }
-    }
-}
 
 // MARK: - Hidden Place Model
 

@@ -40,7 +40,6 @@ struct ContentView: View {
                 if selectedLocationDetail == nil {
                     floatingBottomBar
                         .padding(.horizontal, 16)
-                        .padding(.bottom, 12)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
 
@@ -137,7 +136,9 @@ struct ContentView: View {
                     HapticFeedbackManager.shared.impact(.light)
                     navigationPath.append("layers")
                 } label: {
-                    Image(systemName: "square.stack.3d.down.right.fill")
+                    Image("puzzle-piece")
+                        .scaleEffect(2.0)
+                        .offset(y: -2)
                         .font(.system(size: 17, weight: .semibold))
                         .foregroundStyle(.primary)
                         .frame(width: 46, height: 46)
@@ -934,17 +935,6 @@ struct VisualEffectBlur: UIViewRepresentable {
         UIVisualEffectView(effect: UIBlurEffect(style: blurStyle))
     }
     func updateUIView(_ uiView: UIVisualEffectView, context: Context) {}
-}
-
-struct LayersButton: View {
-    let action: () -> Void
-    var body: some View {
-        Button(action: action) {
-            Image(systemName: "square.stack.3d.down.right.fill")
-                .font(.system(size: 17, weight: .semibold))
-        }
-        .buttonStyle(.plain)
-    }
 }
 
 #Preview {

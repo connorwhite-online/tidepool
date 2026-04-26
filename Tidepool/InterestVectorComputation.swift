@@ -439,7 +439,7 @@ class InterestVectorManager: ObservableObject {
         if let spotify = spotifyManager {
             let tags = spotifyRawInsights(spotify)
             sources.append(SourceInsight(
-                name: "Spotify", icon: "waveform", color: .green,
+                name: "Spotify", icon: "spotify", color: .green,
                 topTags: tags, isConnected: !spotify.topArtists.isEmpty
             ))
         }
@@ -448,7 +448,7 @@ class InterestVectorManager: ObservableObject {
         if let appleMusic = appleMusicManager {
             let tags = appleMusicRawInsights(appleMusic)
             sources.append(SourceInsight(
-                name: "Apple Music", icon: "music.note", color: .red,
+                name: "Apple Music", icon: "apple-music", color: .red,
                 topTags: tags, isConnected: !appleMusic.recentlyPlayed.isEmpty
             ))
         }
@@ -456,7 +456,7 @@ class InterestVectorManager: ObservableObject {
         // Photos — show inferred place names
         let photoTags = photosRawInsights()
         sources.append(SourceInsight(
-            name: "Photos", icon: "photo.fill", color: .orange,
+            name: "Photos", icon: "image", color: .orange,
             topTags: photoTags, isConnected: !photosManager.clusters.isEmpty
         ))
 
@@ -863,49 +863,25 @@ struct DonutChartView: View {
 
 struct InterestInsightsDetailView: View {
     @ObservedObject var vectorManager: InterestVectorManager
+    var photosManager: PhotosIntegrationManager? = nil
     @Environment(\.dismiss) private var dismiss
+    @State private var showingPhotoPlaces = false
 
     var body: some View {
         NavigationView {
             ScrollView {
                 let sources = vectorManager.getSourceInsights()
-                let insights = vectorManager.getInterestInsights()
 
                 VStack(spacing: 20) {
-                    // Blended top interests header
-                    VStack(spacing: 12) {
-                        Text("Your Blended Taste")
-                            .font(.title3)
-                            .fontWeight(.bold)
-
-                        FlowLayout(spacing: 8) {
-                            ForEach(Array(vectorManager.getTopInterests(limit: 8).enumerated()), id: \.offset) { i, interest in
-                                let colors: [Color] = [.pink, .purple, .blue, .cyan, .teal, .green, .orange, .indigo]
-                                let c = colors[i % colors.count]
-                                Text(interest.tag.capitalized.replacingOccurrences(of: "_", with: " "))
-                                    .font(.caption)
-                                    .fontWeight(.semibold)
-                                    .foregroundStyle(c)
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 7)
-                                    .background(c.opacity(0.12))
-                                    .clipShape(Capsule())
-                            }
-                        }
-
-                        // Diversity badge
-                        Text(insights.diversityDescription)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    .padding(20)
-                    .frame(maxWidth: .infinity)
-                    .background(.regularMaterial)
-                    .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-
-                    // Per-source cards
                     ForEach(Array(sources.enumerated()), id: \.offset) { _, source in
-                        sourceCard(source)
+                        if source.name == "Photos" && photosManager != nil {
+                            Button { showingPhotoPlaces = true } label: {
+                                sourceCard(source)
+                            }
+                            .buttonStyle(.plain)
+                        } else {
+                            sourceCard(source)
+                        }
                     }
                 }
                 .padding(.horizontal, 16)
@@ -920,6 +896,11 @@ struct InterestInsightsDetailView: View {
                     Button("Done") { dismiss() }
                 }
             }
+            .sheet(isPresented: $showingPhotoPlaces) {
+                if let photosManager {
+                    PhotoPlacesSheet(photosManager: photosManager)
+                }
+            }
         }
     }
 
@@ -929,7 +910,7 @@ struct InterestInsightsDetailView: View {
         VStack(alignment: .leading, spacing: 14) {
             // Source header
             HStack(spacing: 10) {
-                Image(systemName: source.icon)
+                AdaptiveSymbol(name: source.icon)
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(.white)
                     .frame(width: 34, height: 34)

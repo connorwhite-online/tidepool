@@ -54,7 +54,8 @@ struct ManualLocationImportView: View {
                                     .font(.caption)
                             }
                             HStack {
-                                Image(systemName: "location.fill")
+                                Image("location")
+                                    .scaleEffect(2.0)
                                     .foregroundStyle(.green)
                                     .font(.caption)
                                 Text("Find similar places nearby")
