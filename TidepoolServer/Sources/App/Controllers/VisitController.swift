@@ -5,7 +5,7 @@ import TidepoolShared
 
 struct VisitController: RouteCollection {
     func boot(routes: RoutesBuilder) throws {
-        routes.post("batch", use: batchUpload)
+        routes.on(.POST, "batch", body: .collect(maxSize: "10mb"), use: batchUpload)
         routes.get("patterns", use: patterns)
         routes.get("recent", use: recent)
         routes.delete(":visitID", use: deleteVisit)
