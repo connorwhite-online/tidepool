@@ -238,7 +238,7 @@ final class VisitDetector: NSObject {
             source: source
         )
 
-        pendingVisits.append(report)
+        appendDedupe(report)
         savePending()
         flushToServer()
 
@@ -304,7 +304,7 @@ final class VisitDetector: NSObject {
 
         Task { @MainActor in
             guard BackendClient.shared.isAuthenticated else {
-                self.pendingVisits.append(contentsOf: batch)
+                batch.forEach { self.appendDedupe($0) }
                 self.savePending()
                 self.lastUploadError = "Not authenticated"
                 return
@@ -315,7 +315,7 @@ final class VisitDetector: NSObject {
                 self.lastUploadError = nil
                 print("[VisitDetector] uploaded \(response.accepted) visits, \(response.duplicates) duplicates")
             } catch {
-                self.pendingVisits.append(contentsOf: batch)
+                batch.forEach { self.appendDedupe($0) }
                 self.savePending()
                 self.lastUploadError = error.localizedDescription
                 print("[VisitDetector] upload failed, re-queued: \(error.localizedDescription)")
@@ -367,15 +367,37 @@ final class VisitDetector: NSObject {
         // Try file first
         if let data = try? Data(contentsOf: visitFileURL),
            let visits = try? JSONDecoder().decode([VisitReport].self, from: data) {
-            pendingVisits = visits
+            pendingVisits = Self.deduped(visits)
+            if pendingVisits.count != visits.count { savePending() }
             return
         }
         // Fall back to UserDefaults (migrate old data)
         if let data = UserDefaults.standard.data(forKey: storeKey),
            let visits = try? JSONDecoder().decode([VisitReport].self, from: data) {
-            pendingVisits = visits
+            pendingVisits = Self.deduped(visits)
             savePending() // migrate to file
             UserDefaults.standard.removeObject(forKey: storeKey) // clean up old
         }
+    }
+
+    /// Append a visit only if no existing pending visit shares the same
+    /// (arrivedAt, name) tuple. The server dedupes too, but local dedup
+    /// keeps the queue and UI honest.
+    private func appendDedupe(_ visit: VisitReport) {
+        if pendingVisits.contains(where: { $0.arrivedAt == visit.arrivedAt && $0.name == visit.name }) {
+            return
+        }
+        pendingVisits.append(visit)
+    }
+
+    private static func deduped(_ visits: [VisitReport]) -> [VisitReport] {
+        var seen = Set<String>()
+        var out: [VisitReport] = []
+        out.reserveCapacity(visits.count)
+        for v in visits {
+            let key = "\(v.arrivedAt)|\(v.name)"
+            if seen.insert(key).inserted { out.append(v) }
+        }
+        return out
     }
 }
