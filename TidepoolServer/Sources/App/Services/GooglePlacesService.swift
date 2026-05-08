@@ -1,6 +1,9 @@
 import Vapor
 import Redis
 import TidepoolShared
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// Server-side Google Places API client with Redis caching.
 struct GooglePlacesService {
