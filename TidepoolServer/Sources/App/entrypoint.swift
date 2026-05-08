@@ -9,7 +9,8 @@ enum Entrypoint {
         let app = try await Application.make(env)
         defer { app.shutdown() }
 
-        try configure(app)
+        try await configure(app)
+        try await app.autoMigrate()
         try await app.execute()
     }
 }
