@@ -4,7 +4,7 @@ import FluentPostgresDriver
 import JWT
 import Redis
 
-func configure(_ app: Application) throws {
+func configure(_ app: Application) async throws {
     // MARK: - Database
 
     if let databaseURL = Environment.get("DATABASE_URL") {
