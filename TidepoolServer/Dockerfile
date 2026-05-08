@@ -1,4 +1,4 @@
-FROM swift:5.9-jammy AS builder
+FROM swift:6.0-jammy AS builder
 
 WORKDIR /app
 COPY TidepoolShared/ ./TidepoolShared/
