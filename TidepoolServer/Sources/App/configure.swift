@@ -14,17 +14,20 @@ func configure(_ app: Application) async throws {
         )
     } else {
         // Local development fallback
-        app.databases.use(
-            .postgres(configuration: .init(
-                hostname: Environment.get("DB_HOST") ?? "localhost",
-                port: Environment.get("DB_PORT").flatMap(Int.init) ?? 5432,
-                username: Environment.get("DB_USER") ?? "tidepool",
-                password: Environment.get("DB_PASS") ?? "tidepool",
-                database: Environment.get("DB_NAME") ?? "tidepool",
-                tls: .disable
-            )),
-            as: .psql
+        let host: String = Environment.get("DB_HOST") ?? "localhost"
+        let port: Int = Environment.get("DB_PORT").flatMap(Int.init) ?? 5432
+        let user: String = Environment.get("DB_USER") ?? "tidepool"
+        let pass: String = Environment.get("DB_PASS") ?? "tidepool"
+        let name: String = Environment.get("DB_NAME") ?? "tidepool"
+        let config = SQLPostgresConfiguration(
+            hostname: host,
+            port: port,
+            username: user,
+            password: pass,
+            database: name,
+            tls: .disable
         )
+        app.databases.use(.postgres(configuration: config), as: .psql)
     }
 
     // MARK: - Redis
