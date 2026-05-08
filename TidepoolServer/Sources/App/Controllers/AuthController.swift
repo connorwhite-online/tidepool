@@ -53,7 +53,9 @@ struct AuthController: RouteCollection {
 
     /// Issues a JWT for a synthetic device. Only available in development.
     func debugAuth(req: Request) async throws -> Response {
-        guard req.application.environment != .production else {
+        let isProduction = req.application.environment == .production
+        let debugAllowed = Environment.get("ALLOW_DEBUG_AUTH") == "1"
+        guard !isProduction || debugAllowed else {
             throw Abort(.notFound)
         }
 
