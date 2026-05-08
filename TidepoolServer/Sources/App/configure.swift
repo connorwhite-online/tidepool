@@ -2,16 +2,25 @@ import Vapor
 import Fluent
 import FluentPostgresDriver
 import JWT
+import NIOSSL
 import Redis
 
 func configure(_ app: Application) async throws {
     // MARK: - Database
 
     if let databaseURL = Environment.get("DATABASE_URL") {
-        try app.databases.use(
-            .postgres(url: databaseURL),
-            as: .psql
-        )
+        // BoringSSL (statically linked) does not auto-discover the system CA
+        // bundle, so an explicit TLS config is required. We skip cert
+        // verification because Railway's Postgres is reached via the private
+        // network and we don't ship a CA bundle in the static binary.
+        var tlsConfig = TLSConfiguration.makeClientConfiguration()
+        tlsConfig.certificateVerification = .none
+        let nioSSLContext = try NIOSSLContext(configuration: tlsConfig)
+
+        var postgresConfig = try SQLPostgresConfiguration(url: databaseURL)
+        postgresConfig.coreConfiguration.tls = .require(nioSSLContext)
+
+        app.databases.use(.postgres(configuration: postgresConfig), as: .psql)
     } else {
         // Local development fallback
         let host: String = Environment.get("DB_HOST") ?? "localhost"
