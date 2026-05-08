@@ -25,7 +25,17 @@ struct VisitController: RouteCollection {
         var accepted = 0
         var duplicates = 0
 
-        // Build VALUES clause for all valid visits
+        // Build VALUES clause for all valid visits.
+        // Every string interpolated into raw SQL must escape single quotes.
+        // This is also a SQL-injection hardening — names like "Trader Joe's"
+        // (and poi_ids derived from them) previously broke the whole batch.
+        func sqlLiteral(_ s: String) -> String {
+            "'" + s.replacingOccurrences(of: "'", with: "''") + "'"
+        }
+        func sqlNullable(_ s: String?) -> String {
+            s.map { sqlLiteral($0) } ?? "NULL"
+        }
+
         var valuesClauses: [String] = []
         for report in body.visits {
             guard let arrivedDate = iso.date(from: report.arrivedAt),
@@ -33,17 +43,14 @@ struct VisitController: RouteCollection {
 
             let arrivedStr = iso.string(from: arrivedDate)
             let departedStr = iso.string(from: departedDate)
-            let poiVal = report.poiId.map { "'\($0)'" } ?? "NULL"
-            let yelpVal = report.yelpId.map { "'\($0)'" } ?? "NULL"
-            let escapedName = report.name.replacingOccurrences(of: "'", with: "''")
 
             valuesClauses.append("""
-                (gen_random_uuid(), '\(deviceIDStr)'::uuid, \(poiVal), \(yelpVal),
-                 '\(escapedName)', '\(report.category.rawValue)',
+                (gen_random_uuid(), '\(deviceIDStr)'::uuid, \(sqlNullable(report.poiId)), \(sqlNullable(report.yelpId)),
+                 \(sqlLiteral(report.name)), \(sqlLiteral(report.category.rawValue)),
                  \(report.latitude), \(report.longitude),
                  '\(arrivedStr)'::timestamptz, '\(departedStr)'::timestamptz,
                  \(report.dayOfWeek), \(report.hourOfDay), \(report.durationMinutes),
-                 \(report.confidence), '\(report.source)', now())
+                 \(report.confidence), \(sqlLiteral(report.source)), now())
                 """)
         }
 
