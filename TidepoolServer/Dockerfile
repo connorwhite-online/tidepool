@@ -10,6 +10,7 @@ RUN swift build -c release --static-swift-stdlib
 FROM ubuntu:jammy
 
 RUN apt-get update && apt-get install -y \
+    ca-certificates \
     libcurl4 \
     libxml2 \
     && rm -rf /var/lib/apt/lists/*
