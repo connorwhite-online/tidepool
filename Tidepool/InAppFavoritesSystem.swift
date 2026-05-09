@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import CoreLocation
 import SwiftUI
@@ -23,11 +24,19 @@ struct FavoriteLocation: Identifiable, Codable {
         case latitude, longitude
     }
 
-    /// Generate a stable place ID from name and coordinate so the same physical place always maps to the same ID
+    /// Generate a stable place ID from name and coordinate so the same physical
+    /// place always maps to the same ID. The output is `p_<16 hex chars>` —
+    /// fixed length, opaque, and free of any character (apostrophes, slashes,
+    /// non-ASCII) that previously broke server-side SQL builders or external
+    /// systems that don't quote it. Stays deterministic across launches because
+    /// SHA-256 is, and lat/lon are rounded to 5 decimal places (~1m grid).
     static func stablePlaceId(name: String, coordinate: CLLocationCoordinate2D) -> String {
         let lat = String(format: "%.5f", coordinate.latitude)
         let lon = String(format: "%.5f", coordinate.longitude)
-        return "\(name)_\(lat)_\(lon)"
+        let input = "\(name)|\(lat)|\(lon)"
+        let digest = SHA256.hash(data: Data(input.utf8))
+        let hex = digest.map { String(format: "%02x", $0) }.joined()
+        return "p_" + String(hex.prefix(16))
     }
 
     init(placeId: String, name: String, category: PlaceCategory, coordinate: CLLocationCoordinate2D, rating: Int? = nil, notes: String? = nil, tags: [String] = []) {
