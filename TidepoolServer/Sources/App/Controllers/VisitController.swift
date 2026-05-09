@@ -8,6 +8,7 @@ struct VisitController: RouteCollection {
         routes.on(.POST, "batch", body: .collect(maxSize: "10mb"), use: batchUpload)
         routes.get("patterns", use: patterns)
         routes.get("recent", use: recent)
+        routes.put(":visitID", use: updateVisit)
         routes.delete(":visitID", use: deleteVisit)
     }
 
@@ -161,6 +162,7 @@ struct VisitController: RouteCollection {
         let iso = ISO8601DateFormatter()
         return visits.map { v in
             VisitReport(
+                id: v.id?.uuidString,
                 poiId: v.poiID, yelpId: v.yelpID, name: v.name,
                 category: PlaceCategory(rawValue: v.category) ?? .other,
                 latitude: v.latitude, longitude: v.longitude,
@@ -171,6 +173,60 @@ struct VisitController: RouteCollection {
                 confidence: v.confidence, source: v.source
             )
         }
+    }
+
+    // MARK: - Update Visit
+
+    /// PUT /v1/visits/:visitID — replace the mutable fields of a visit.
+    /// Caller-supplied id, device_id, and created_at are ignored; everything
+    /// else is overwritten. Returns the updated VisitReport.
+    func updateVisit(req: Request) async throws -> VisitReport {
+        let payload = try req.auth.require(DevicePayload.self)
+        guard let idStr = req.parameters.get("visitID"),
+              let id = UUID(uuidString: idStr) else {
+            throw Abort(.badRequest, reason: "Invalid visit ID")
+        }
+        guard let visit = try await Visit.find(id, on: req.db) else {
+            throw Abort(.notFound)
+        }
+        guard visit.$device.id == payload.deviceID else {
+            throw Abort(.forbidden)
+        }
+
+        let body = try req.content.decode(VisitReport.self)
+        let iso = ISO8601DateFormatter()
+        guard let arrivedDate = iso.date(from: body.arrivedAt),
+              let departedDate = iso.date(from: body.departedAt) else {
+            throw Abort(.badRequest, reason: "Invalid arrived_at or departed_at")
+        }
+
+        visit.poiID = body.poiId
+        visit.yelpID = body.yelpId
+        visit.name = body.name
+        visit.category = body.category.rawValue
+        visit.latitude = body.latitude
+        visit.longitude = body.longitude
+        visit.arrivedAt = arrivedDate
+        visit.departedAt = departedDate
+        visit.dayOfWeek = body.dayOfWeek
+        visit.hourOfDay = body.hourOfDay
+        visit.durationMinutes = body.durationMinutes
+        visit.confidence = body.confidence
+        visit.source = body.source
+
+        try await visit.save(on: req.db)
+
+        return VisitReport(
+            id: visit.id?.uuidString,
+            poiId: visit.poiID, yelpId: visit.yelpID, name: visit.name,
+            category: PlaceCategory(rawValue: visit.category) ?? .other,
+            latitude: visit.latitude, longitude: visit.longitude,
+            arrivedAt: iso.string(from: visit.arrivedAt),
+            departedAt: iso.string(from: visit.departedAt),
+            dayOfWeek: visit.dayOfWeek, hourOfDay: visit.hourOfDay,
+            durationMinutes: visit.durationMinutes,
+            confidence: visit.confidence, source: visit.source
+        )
     }
 
     // MARK: - Delete Visit

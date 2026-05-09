@@ -1919,8 +1919,41 @@ struct CheckInDetailView: View {
     @StateObject private var searchCompleter = PlaceSearchCompleter()
     @State private var searchText = ""
     @State private var suppressNextChange = false
+    @State private var isDeleting = false
+    @State private var mutationError: String?
 
     private var visit: VisitReport { item.visit }
+
+    /// We can mutate either a pending visit (addressable by local index) or a
+    /// synced visit that came back from the server with an id.
+    private var canMutate: Bool {
+        (item.isPending && item.pendingIndex != nil) || (!item.isPending && visit.id != nil)
+    }
+
+    private func performDelete() {
+        if item.isPending, let idx = item.pendingIndex {
+            VisitDetector.shared.removeVisit(at: idx)
+            onDelete()
+            return
+        }
+        guard let visitID = visit.id else { return }
+        isDeleting = true
+        mutationError = nil
+        Task {
+            do {
+                try await BackendClient.shared.deleteVisit(id: visitID)
+                await MainActor.run {
+                    isDeleting = false
+                    onDelete()
+                }
+            } catch {
+                await MainActor.run {
+                    isDeleting = false
+                    mutationError = "Couldn't delete: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
 
     var body: some View {
         ScrollView {
@@ -1981,7 +2014,10 @@ struct CheckInDetailView: View {
                 .background(.regularMaterial)
                 .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
 
-                if item.isPending, item.pendingIndex != nil {
+                // Edit/delete works for both pending and synced check-ins.
+                // Pending visits are addressed by index in the local queue;
+                // synced visits are addressed by their server-assigned id.
+                if canMutate {
                     Button { showingRelink = true } label: {
                         HStack {
                             Image(systemName: "arrow.triangle.2.circlepath")
@@ -1997,16 +2033,19 @@ struct CheckInDetailView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                     }
                     .buttonStyle(.plain)
+                    .disabled(isDeleting)
 
                     Button {
-                        if let idx = item.pendingIndex {
-                            VisitDetector.shared.removeVisit(at: idx)
-                        }
-                        onDelete()
+                        performDelete()
                     } label: {
                         HStack {
-                            Image(systemName: "trash")
-                                .font(.subheadline)
+                            if isDeleting {
+                                ProgressView()
+                                    .tint(.red)
+                            } else {
+                                Image(systemName: "trash")
+                                    .font(.subheadline)
+                            }
                             Text("Delete check-in")
                                 .font(.subheadline)
                                 .fontWeight(.medium)
@@ -2018,6 +2057,14 @@ struct CheckInDetailView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                     }
                     .buttonStyle(.plain)
+                    .disabled(isDeleting)
+
+                    if let err = mutationError {
+                        Text(err)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                    }
                 }
             }
             .padding(16)
@@ -2099,8 +2146,6 @@ struct CheckInDetailView: View {
     }
 
     private func relinkToSuggestion(_ suggestion: MKLocalSearchCompletion) {
-        guard let idx = item.pendingIndex else { return }
-
         let request = MKLocalSearch.Request(completion: suggestion)
         MKLocalSearch(request: request).start { response, _ in
             guard let mapItem = response?.mapItems.first else { return }
@@ -2110,6 +2155,7 @@ struct CheckInDetailView: View {
             let newCategory = PlaceCategory.from(mapItem: mapItem)
 
             let updated = VisitReport(
+                id: visit.id,
                 poiId: FavoriteLocation.stablePlaceId(name: newName, coordinate: newCoord),
                 yelpId: visit.yelpId,
                 name: newName,
@@ -2125,9 +2171,27 @@ struct CheckInDetailView: View {
                 source: visit.source
             )
 
-            VisitDetector.shared.updateVisit(at: idx, with: updated)
-            onChange()
-            showingRelink = false
+            // Pending: mutate local queue. Synced: round-trip to server.
+            if item.isPending, let idx = item.pendingIndex {
+                VisitDetector.shared.updateVisit(at: idx, with: updated)
+                onChange()
+                showingRelink = false
+            } else if let visitID = visit.id {
+                Task {
+                    do {
+                        _ = try await BackendClient.shared.updateVisit(id: visitID, with: updated)
+                        await MainActor.run {
+                            onChange()
+                            showingRelink = false
+                        }
+                    } catch {
+                        await MainActor.run {
+                            mutationError = "Couldn't re-link: \(error.localizedDescription)"
+                            showingRelink = false
+                        }
+                    }
+                }
+            }
         }
     }
 }
