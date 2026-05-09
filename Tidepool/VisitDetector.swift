@@ -238,6 +238,7 @@ final class VisitDetector: NSObject {
             source: source
         )
 
+        guard reconcileOverlapping(report) else { return }
         appendDedupe(report)
         savePending()
         flushToServer()
@@ -388,6 +389,54 @@ final class VisitDetector: NSObject {
             return
         }
         pendingVisits.append(visit)
+    }
+
+    /// When two POIs are detected for what is really one visit (e.g. a
+    /// transit-stop name snaps from a broad CLVisit while the user is
+    /// actually inside the storefront 50m away), the time ranges overlap
+    /// and one fully contains the other. The shorter range is the more
+    /// specific snap (GPS settled, smaller uncertainty), so we keep that
+    /// one and drop the wrapper.
+    ///
+    /// - Returns: `true` if `newReport` should be appended, `false` if it
+    ///   should be discarded because an existing pending visit is more
+    ///   specific.
+    private func reconcileOverlapping(_ newReport: VisitReport) -> Bool {
+        guard let newArrived = iso.date(from: newReport.arrivedAt),
+              let newDeparted = iso.date(from: newReport.departedAt) else { return true }
+        let newCoord = CLLocation(latitude: newReport.latitude, longitude: newReport.longitude)
+        let differentPlaceMeters: CLLocationDistance = 50
+
+        var indicesToDrop: [Int] = []
+
+        for (idx, existing) in pendingVisits.enumerated() {
+            guard let exArrived = iso.date(from: existing.arrivedAt),
+                  let exDeparted = iso.date(from: existing.departedAt) else { continue }
+            let exCoord = CLLocation(latitude: existing.latitude, longitude: existing.longitude)
+
+            // Same physical place — leave alone, appendDedupe handles same-name dupes.
+            guard exCoord.distance(from: newCoord) > differentPlaceMeters else { continue }
+
+            let exContainsNew = exArrived <= newArrived && exDeparted >= newDeparted
+            let newContainsEx = newArrived <= exArrived && newDeparted >= exDeparted
+
+            if exContainsNew && !newContainsEx {
+                // Existing wraps new — new is more specific. Drop existing, keep new.
+                indicesToDrop.append(idx)
+            } else if newContainsEx && !exContainsNew {
+                // New wraps existing — existing is more specific. Discard new.
+                print("[VisitDetector] dropping wrapper visit '\(newReport.name)' (kept '\(existing.name)')")
+                return false
+            }
+            // Partial overlap (neither contains the other) is treated as two
+            // genuine consecutive visits — leave both.
+        }
+
+        for idx in indicesToDrop.reversed() {
+            let dropped = pendingVisits.remove(at: idx)
+            print("[VisitDetector] dropping wrapper visit '\(dropped.name)' (kept '\(newReport.name)')")
+        }
+        return true
     }
 
     private static func deduped(_ visits: [VisitReport]) -> [VisitReport] {
