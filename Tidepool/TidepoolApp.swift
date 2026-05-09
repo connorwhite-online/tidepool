@@ -49,8 +49,10 @@ struct TidepoolApp: App {
                 .environment(\.font, .system(.body, design: .rounded))
                 .task {
                     #if DEBUG
-                    // Always re-auth in debug to ensure fresh token against local server
-                    print("[App] Debug auth: attempting against local server...")
+                    // Always re-auth on launch in debug builds so the JWT in
+                    // keychain is freshly minted by whatever backend is
+                    // currently configured (Railway in production).
+                    print("[App] Debug auth: attempting...")
                     BackendClient.shared.logout() // clear any stale credentials
                     do {
                         try await BackendClient.shared.debugAuthenticate()
