@@ -408,6 +408,11 @@ public struct TasteSummaryResponse: Codable, Sendable {
 // MARK: - Visits
 
 public struct VisitReport: Codable, Sendable {
+    /// Server-assigned UUID. nil for newly-detected visits the iOS client
+    /// hasn't uploaded yet (those are addressed by index in the local
+    /// pending queue). Populated by GET /v1/visits/recent so the client
+    /// can issue DELETE / PUT against /v1/visits/:id.
+    public let id: String?
     public let poiId: String?
     public let yelpId: String?
     public let name: String
@@ -422,10 +427,11 @@ public struct VisitReport: Codable, Sendable {
     public let confidence: Float
     public let source: String
 
-    public init(poiId: String?, yelpId: String?, name: String, category: PlaceCategory,
+    public init(id: String? = nil, poiId: String?, yelpId: String?, name: String, category: PlaceCategory,
                 latitude: Double, longitude: Double, arrivedAt: String, departedAt: String,
                 dayOfWeek: Int, hourOfDay: Int, durationMinutes: Int,
                 confidence: Float = 1.0, source: String = "visit") {
+        self.id = id
         self.poiId = poiId; self.yelpId = yelpId; self.name = name; self.category = category
         self.latitude = latitude; self.longitude = longitude
         self.arrivedAt = arrivedAt; self.departedAt = departedAt
@@ -434,6 +440,7 @@ public struct VisitReport: Codable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
+        case id
         case poiId = "poi_id", yelpId = "yelp_id", name, category, latitude, longitude
         case arrivedAt = "arrived_at", departedAt = "departed_at"
         case dayOfWeek = "day_of_week", hourOfDay = "hour_of_day"

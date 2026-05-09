@@ -147,6 +147,18 @@ class BackendClient: ObservableObject {
         try await request(method: "GET", path: "/v1/visits/recent?limit=\(limit)")
     }
 
+    /// PUT /v1/visits/:id — update a synced visit (re-link to a different POI,
+    /// rename, etc.). Returns the updated report.
+    func updateVisit(id: String, with body: VisitReport) async throws -> VisitReport {
+        try await request(method: "PUT", path: "/v1/visits/\(id)", body: body)
+    }
+
+    /// DELETE /v1/visits/:id — remove a synced visit. Server returns 204; we
+    /// don't decode anything from it.
+    func deleteVisit(id: String) async throws {
+        let _: EmptyResponse = try await request(method: "DELETE", path: "/v1/visits/\(id)")
+    }
+
     // MARK: - Aligned Heat & Recommendations
 
     func fetchAlignedHeat(_ body: AlignedHeatRequest) async throws -> HeatTileResponse {
