@@ -5,9 +5,12 @@ COPY TidepoolShared/ ./TidepoolShared/
 COPY TidepoolServer/ ./TidepoolServer/
 
 WORKDIR /app/TidepoolServer
-RUN swift build -c release --static-swift-stdlib
+# --static-swift-stdlib makes the linker hold huge symbol tables in memory and
+# blew Railway's build container past its 8GB limit. Dynamic linking keeps
+# peak memory low; the runtime stage below ships the matching Swift dylibs.
+RUN swift build -c release
 
-FROM ubuntu:jammy
+FROM swift:6.0-jammy-slim
 
 RUN apt-get update && apt-get install -y \
     ca-certificates \
