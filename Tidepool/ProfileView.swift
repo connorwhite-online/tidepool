@@ -1921,6 +1921,7 @@ struct CheckInDetailView: View {
     @State private var suppressNextChange = false
     @State private var isDeleting = false
     @State private var mutationError: String?
+    @State private var nearbyPOIs: [NearbyPOI] = []
 
     private var visit: VisitReport { item.visit }
 
@@ -2095,7 +2096,7 @@ struct CheckInDetailView: View {
                 .padding(.horizontal, 16)
                 .padding(.top, 16)
 
-                if !searchCompleter.suggestions.isEmpty {
+                if !searchText.isEmpty && !searchCompleter.suggestions.isEmpty {
                     List {
                         ForEach(searchCompleter.suggestions, id: \.self) { suggestion in
                             Button {
@@ -2116,9 +2117,42 @@ struct CheckInDetailView: View {
                         }
                     }
                     .listStyle(.plain)
+                } else if searchText.isEmpty && !nearbyPOIs.isEmpty {
+                    List {
+                        Section {
+                            ForEach(nearbyPOIs) { poi in
+                                Button {
+                                    relinkToMapItem(poi.mapItem)
+                                } label: {
+                                    HStack {
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(poi.mapItem.name ?? "Unknown")
+                                                .font(.subheadline)
+                                                .fontWeight(.medium)
+                                            if let category = poi.mapItem.pointOfInterestCategory?.rawValue
+                                                .replacingOccurrences(of: "MKPOICategory", with: "") {
+                                                Text(category)
+                                                    .font(.caption)
+                                                    .foregroundStyle(.secondary)
+                                            }
+                                        }
+                                        Spacer()
+                                        Text(formatDistance(poi.distance))
+                                            .font(.caption)
+                                            .foregroundStyle(.tertiary)
+                                            .monospacedDigit()
+                                    }
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        } header: {
+                            Text("Nearby places")
+                        }
+                    }
+                    .listStyle(.plain)
                 } else {
                     Spacer()
-                    Text("Search for the place you actually visited")
+                    Text(searchText.isEmpty ? "Looking for nearby places…" : "No matches")
                         .font(.subheadline)
                         .foregroundStyle(.quaternary)
                     Spacer()
@@ -2141,6 +2175,33 @@ struct CheckInDetailView: View {
                     center: CLLocationCoordinate2D(latitude: visit.latitude, longitude: visit.longitude),
                     latitudinalMeters: 2000, longitudinalMeters: 2000
                 ))
+                loadNearbyPOIs()
+            }
+        }
+    }
+
+    private func formatDistance(_ meters: CLLocationDistance) -> String {
+        if meters < 100 { return "\(Int(meters))m" }
+        if meters < 1000 { return "\(Int(meters / 10) * 10)m" }
+        return String(format: "%.1fkm", meters / 1000)
+    }
+
+    /// Fire a 250m-radius POI search around the visit's recorded coordinate
+    /// and rank by distance. Shown immediately when the relink sheet opens so
+    /// users almost never have to type.
+    private func loadNearbyPOIs() {
+        let center = CLLocationCoordinate2D(latitude: visit.latitude, longitude: visit.longitude)
+        let originLoc = CLLocation(latitude: center.latitude, longitude: center.longitude)
+        let request = MKLocalPointsOfInterestRequest(center: center, radius: 250)
+        MKLocalSearch(request: request).start { response, _ in
+            let items = response?.mapItems ?? []
+            let ranked = items.compactMap { item -> NearbyPOI? in
+                guard let loc = item.placemark.location else { return nil }
+                let dist = loc.distance(from: originLoc)
+                return NearbyPOI(mapItem: item, distance: dist)
+            }.sorted { $0.distance < $1.distance }
+            DispatchQueue.main.async {
+                self.nearbyPOIs = ranked
             }
         }
     }
@@ -2149,51 +2210,72 @@ struct CheckInDetailView: View {
         let request = MKLocalSearch.Request(completion: suggestion)
         MKLocalSearch(request: request).start { response, _ in
             guard let mapItem = response?.mapItems.first else { return }
+            self.commitRelink(to: mapItem, fallbackName: suggestion.title)
+        }
+    }
 
-            let newName = mapItem.name ?? suggestion.title
-            let newCoord = mapItem.placemark.location?.coordinate ?? CLLocationCoordinate2D(latitude: visit.latitude, longitude: visit.longitude)
-            let newCategory = PlaceCategory.from(mapItem: mapItem)
+    private func relinkToMapItem(_ mapItem: MKMapItem) {
+        commitRelink(to: mapItem, fallbackName: nil)
+    }
 
-            let updated = VisitReport(
-                id: visit.id,
-                poiId: FavoriteLocation.stablePlaceId(name: newName, coordinate: newCoord),
-                yelpId: visit.yelpId,
-                name: newName,
-                category: TidepoolShared.PlaceCategory(rawValue: newCategory.rawValue) ?? .other,
-                latitude: newCoord.latitude,
-                longitude: newCoord.longitude,
-                arrivedAt: visit.arrivedAt,
-                departedAt: visit.departedAt,
-                dayOfWeek: visit.dayOfWeek,
-                hourOfDay: visit.hourOfDay,
-                durationMinutes: visit.durationMinutes,
-                confidence: 1.0,
-                source: visit.source
-            )
+    private func commitRelink(to mapItem: MKMapItem, fallbackName: String?) {
+        let newName = mapItem.name ?? fallbackName ?? "Unknown"
+        let newCoord = mapItem.placemark.location?.coordinate
+            ?? CLLocationCoordinate2D(latitude: visit.latitude, longitude: visit.longitude)
+        let newCategory = PlaceCategory.from(mapItem: mapItem)
 
-            // Pending: mutate local queue. Synced: round-trip to server.
-            if item.isPending, let idx = item.pendingIndex {
-                VisitDetector.shared.updateVisit(at: idx, with: updated)
-                onChange()
-                showingRelink = false
-            } else if let visitID = visit.id {
-                Task {
-                    do {
-                        _ = try await BackendClient.shared.updateVisit(id: visitID, with: updated)
-                        await MainActor.run {
-                            onChange()
-                            showingRelink = false
-                        }
-                    } catch {
-                        await MainActor.run {
-                            mutationError = "Couldn't re-link: \(error.localizedDescription)"
-                            showingRelink = false
-                        }
+        let updated = VisitReport(
+            id: visit.id,
+            poiId: FavoriteLocation.stablePlaceId(name: newName, coordinate: newCoord),
+            yelpId: visit.yelpId,
+            name: newName,
+            category: TidepoolShared.PlaceCategory(rawValue: newCategory.rawValue) ?? .other,
+            latitude: newCoord.latitude,
+            longitude: newCoord.longitude,
+            arrivedAt: visit.arrivedAt,
+            departedAt: visit.departedAt,
+            dayOfWeek: visit.dayOfWeek,
+            hourOfDay: visit.hourOfDay,
+            durationMinutes: visit.durationMinutes,
+            confidence: 1.0,
+            source: visit.source
+        )
+
+        // Pending: mutate local queue. Synced: round-trip to server.
+        if item.isPending, let idx = item.pendingIndex {
+            VisitDetector.shared.updateVisit(at: idx, with: updated)
+            finishRelink()
+        } else if let visitID = visit.id {
+            Task {
+                do {
+                    _ = try await BackendClient.shared.updateVisit(id: visitID, with: updated)
+                    await MainActor.run { finishRelink() }
+                } catch {
+                    await MainActor.run {
+                        mutationError = "Couldn't re-link: \(error.localizedDescription)"
+                        showingRelink = false
                     }
                 }
             }
         }
     }
+
+    /// Close the relink modal and pop the detail view. Required because the
+    /// CheckInItem's id is composed from `name`; after relinking, the old id
+    /// no longer matches anything in the list and the detail view would
+    /// render blank.
+    private func finishRelink() {
+        showingRelink = false
+        onDelete()
+    }
+}
+
+/// A POI ranked by distance from a reference coordinate, for the relink
+/// sheet's "Nearby places" pre-populated suggestion list.
+private struct NearbyPOI: Identifiable {
+    let id = UUID()
+    let mapItem: MKMapItem
+    let distance: CLLocationDistance
 }
 
 struct PendingQueueDebugView: View {
