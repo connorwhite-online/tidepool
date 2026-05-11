@@ -212,8 +212,13 @@ private struct LocationDetailContent: View {
                     }
                 }
             }
+            // First/last tile align with the sheet's 20pt gutter; the
+            // ScrollView itself bleeds edge-to-edge below so tiles slide
+            // past the gutter as you scroll rather than getting clipped.
+            .padding(.horizontal, 20)
         }
         .frame(height: photoTileSize)
+        .padding(.horizontal, -20)
     }
 
     private var photoSkeleton: some View {
