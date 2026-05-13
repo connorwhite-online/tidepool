@@ -12,70 +12,113 @@ struct VisitController: RouteCollection {
         routes.delete(":visitID", use: deleteVisit)
     }
 
-    /// Accept a batch of visit reports, deduplicate per-row, and insert each
-    /// independently so a single bad row can't 500 the entire batch. All
-    /// values flow through Fluent's parameterized query builder, so there's
-    /// no string escaping to get wrong.
+    /// Accept a batch of visit reports, deduplicate per-row, and insert
+    /// non-duplicates. Spatial+temporal proximity dedup — same device,
+    /// ~50m, ±5min.
+    ///
+    /// We fetch all existing visits in the batch's combined arrival window
+    /// in a single query rather than running a COUNT per row, then dedup
+    /// in memory. For a 50-visit batch this collapses 50 round-trips to
+    /// Postgres into one.
     func batchUpload(req: Request) async throws -> VisitBatchResponse {
         let payload = try req.auth.require(DevicePayload.self)
         let body = try req.content.decode(VisitBatchRequest.self)
 
         let iso = ISO8601DateFormatter()
-        var accepted = 0
-        var duplicates = 0
-        var skipped = 0
-
-        // Spatial+temporal proximity dedup — same device, ~50m, ±5min.
-        // Matches the previous behavior; expressed via Fluent's range filters.
         let latEpsilon = 0.0005
         let lonEpsilon = 0.0005
         let timeWindow: TimeInterval = 300
 
+        // Pre-parse arrival/departure dates and bail any rows with bad ISO strings.
+        struct Parsed {
+            let report: VisitReport
+            let arrived: Date
+            let departed: Date
+        }
+        var parsed: [Parsed] = []
+        parsed.reserveCapacity(body.visits.count)
+        var skipped = 0
         for report in body.visits {
-            guard let arrivedDate = iso.date(from: report.arrivedAt),
-                  let departedDate = iso.date(from: report.departedAt) else {
+            guard let a = iso.date(from: report.arrivedAt),
+                  let d = iso.date(from: report.departedAt) else {
                 skipped += 1
                 continue
             }
+            parsed.append(Parsed(report: report, arrived: a, departed: d))
+        }
 
-            do {
-                let dupCount = try await Visit.query(on: req.db)
-                    .filter(\.$device.$id == payload.deviceID)
-                    .filter(\.$latitude >= report.latitude - latEpsilon)
-                    .filter(\.$latitude <= report.latitude + latEpsilon)
-                    .filter(\.$longitude >= report.longitude - lonEpsilon)
-                    .filter(\.$longitude <= report.longitude + lonEpsilon)
-                    .filter(\.$arrivedAt >= arrivedDate.addingTimeInterval(-timeWindow))
-                    .filter(\.$arrivedAt <= arrivedDate.addingTimeInterval(timeWindow))
-                    .count()
+        // Single query: every existing visit for this device whose arrival
+        // falls within timeWindow of any incoming row.
+        var existing: [Visit] = []
+        if let firstArrival = parsed.map(\.arrived).min(),
+           let lastArrival = parsed.map(\.arrived).max() {
+            existing = try await Visit.query(on: req.db)
+                .filter(\.$device.$id == payload.deviceID)
+                .filter(\.$arrivedAt >= firstArrival.addingTimeInterval(-timeWindow))
+                .filter(\.$arrivedAt <= lastArrival.addingTimeInterval(timeWindow))
+                .all()
+        }
 
-                if dupCount > 0 {
-                    duplicates += 1
-                    continue
+        // In-memory dedup against the prefetched set + the rows we've already
+        // decided to accept in this batch (so two identical rows in one batch
+        // collapse correctly).
+        var toInsert: [Visit] = []
+        toInsert.reserveCapacity(parsed.count)
+        var duplicates = 0
+
+        func isDuplicate(_ p: Parsed) -> Bool {
+            let candidates = existing.lazy + toInsert.lazy.map { v -> Visit in v }
+            for c in candidates {
+                if abs(c.latitude - p.report.latitude) <= latEpsilon,
+                   abs(c.longitude - p.report.longitude) <= lonEpsilon,
+                   abs(c.arrivedAt.timeIntervalSince(p.arrived)) <= timeWindow {
+                    return true
                 }
+            }
+            return false
+        }
 
-                let visit = Visit()
-                visit.$device.id = payload.deviceID
-                visit.poiID = report.poiId
-                visit.yelpID = report.yelpId
-                visit.name = report.name
-                visit.category = report.category.rawValue
-                visit.latitude = report.latitude
-                visit.longitude = report.longitude
-                visit.arrivedAt = arrivedDate
-                visit.departedAt = departedDate
-                visit.dayOfWeek = report.dayOfWeek
-                visit.hourOfDay = report.hourOfDay
-                visit.durationMinutes = report.durationMinutes
-                visit.confidence = report.confidence
-                visit.source = report.source
-                visit.createdAt = Date()
+        for p in parsed {
+            if isDuplicate(p) {
+                duplicates += 1
+                continue
+            }
+            let visit = Visit()
+            visit.$device.id = payload.deviceID
+            visit.poiID = p.report.poiId
+            visit.yelpID = p.report.yelpId
+            visit.name = p.report.name
+            visit.category = p.report.category.rawValue
+            visit.latitude = p.report.latitude
+            visit.longitude = p.report.longitude
+            visit.arrivedAt = p.arrived
+            visit.departedAt = p.departed
+            visit.dayOfWeek = p.report.dayOfWeek
+            visit.hourOfDay = p.report.hourOfDay
+            visit.durationMinutes = p.report.durationMinutes
+            visit.confidence = p.report.confidence
+            visit.source = p.report.source
+            visit.createdAt = Date()
+            toInsert.append(visit)
+        }
 
-                try await visit.save(on: req.db)
-                accepted += 1
+        var accepted = 0
+        if !toInsert.isEmpty {
+            do {
+                try await toInsert.create(on: req.db)
+                accepted = toInsert.count
             } catch {
-                req.logger.warning("visits/batch: skipping '\(report.name)' at (\(report.latitude), \(report.longitude)): \(error)")
-                skipped += 1
+                // Fall back to per-row inserts so one bad row can't 500 the batch.
+                req.logger.warning("visits/batch: bulk insert failed (\(error)); falling back to per-row")
+                for visit in toInsert {
+                    do {
+                        try await visit.save(on: req.db)
+                        accepted += 1
+                    } catch {
+                        req.logger.warning("visits/batch: skipping '\(visit.name)' at (\(visit.latitude), \(visit.longitude)): \(error)")
+                        skipped += 1
+                    }
+                }
             }
         }
 
