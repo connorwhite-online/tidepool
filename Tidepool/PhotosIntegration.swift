@@ -295,12 +295,7 @@ class PhotosIntegrationManager: ObservableObject {
             request.naturalLanguageQuery = ""
             request.region = MKCoordinateRegion(center: center, latitudinalMeters: radiusMeters, longitudinalMeters: radiusMeters)
             MKLocalSearch(request: request).start { response, _ in
-                let best = response?.mapItems
-                    .filter { $0.name != nil && $0.placemark.location != nil }
-                    .filter { $0.placemark.location!.distance(from: location) <= radiusMeters }
-                    .sorted { ($0.placemark.location?.distance(from: location) ?? .infinity) < ($1.placemark.location?.distance(from: location) ?? .infinity) }
-                    .first
-                continuation.resume(returning: best)
+                continuation.resume(returning: Self.nearestNamed(in: response?.mapItems, to: location, within: radiusMeters))
             }
         }
 
@@ -312,12 +307,7 @@ class PhotosIntegrationManager: ObservableObject {
         let poiResult = await withCheckedContinuation { (continuation: CheckedContinuation<MKMapItem?, Never>) in
             let request = MKLocalPointsOfInterestRequest(center: center, radius: radiusMeters)
             MKLocalSearch(request: request).start { response, _ in
-                let best = response?.mapItems
-                    .filter { $0.name != nil && $0.placemark.location != nil }
-                    .filter { $0.placemark.location!.distance(from: location) <= radiusMeters }
-                    .sorted { ($0.placemark.location?.distance(from: location) ?? .infinity) < ($1.placemark.location?.distance(from: location) ?? .infinity) }
-                    .first
-                continuation.resume(returning: best)
+                continuation.resume(returning: Self.nearestNamed(in: response?.mapItems, to: location, within: radiusMeters))
             }
         }
 
@@ -341,6 +331,15 @@ class PhotosIntegrationManager: ObservableObject {
         }
 
         return nil
+    }
+
+    private static func nearestNamed(in items: [MKMapItem]?, to location: CLLocation, within radius: CLLocationDistance) -> MKMapItem? {
+        items?.compactMap { item -> (MKMapItem, CLLocationDistance)? in
+            guard item.name != nil, let d = item.placemark.location?.distance(from: location), d <= radius else { return nil }
+            return (item, d)
+        }
+        .min(by: { $0.1 < $1.1 })?
+        .0
     }
 
     private func inferPlaceCategory(from placemark: CLPlacemark) -> PlaceCategory {
@@ -405,9 +404,9 @@ class PhotosIntegrationManager: ObservableObject {
     }
     
     private func dateRangeFrom(_ locations: [PhotoLocation]) -> ClosedRange<Date>? {
-        guard !locations.isEmpty else { return nil }
         let dates = locations.map { $0.timestamp }.sorted()
-        return dates.first!...dates.last!
+        guard let first = dates.first, let last = dates.last else { return nil }
+        return first...last
     }
     
     func getInterestTags() -> [String: Int] {

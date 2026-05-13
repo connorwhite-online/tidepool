@@ -158,10 +158,14 @@ final class VisitDetector: NSObject {
             let poiResult = await withCheckedContinuation { (cont: CheckedContinuation<MKMapItem?, Never>) in
                 let request = MKLocalPointsOfInterestRequest(center: coord, radius: self.poiSearchRadiusMeters)
                 MKLocalSearch(request: request).start { response, _ in
+                    let radius = self.poiSearchRadiusMeters
                     let best = response?.mapItems
-                        .filter { $0.placemark.location?.distance(from: location) ?? .infinity < self.poiSearchRadiusMeters }
-                        .sorted { ($0.placemark.location?.distance(from: location) ?? .infinity) < ($1.placemark.location?.distance(from: location) ?? .infinity) }
-                        .first
+                        .compactMap { item -> (MKMapItem, CLLocationDistance)? in
+                            guard let d = item.placemark.location?.distance(from: location), d < radius else { return nil }
+                            return (item, d)
+                        }
+                        .min(by: { $0.1 < $1.1 })?
+                        .0
                     cont.resume(returning: best)
                 }
             }
