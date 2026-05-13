@@ -20,6 +20,10 @@ class InterestVectorManager: ObservableObject {
 
     // Canonical vocabulary shared between client and server (from TidepoolShared)
     private let vocabulary = InterestVocabulary.tags
+
+    // Outstanding upload — cancelled when a newer computeVector() supersedes it
+    // so rapid recomputes don't pile up requests on slow networks.
+    private var pendingUploadTask: Task<Void, Never>?
     
     enum VectorQuality {
         case poor      // 0-25% data coverage
@@ -101,16 +105,22 @@ class InterestVectorManager: ObservableObject {
             activeSources: getActiveDataSources()
         )
 
-        Task {
+        pendingUploadTask?.cancel()
+        let currentVectorSnapshot = currentVector
+        let activeSourcesSnapshot = getActiveDataSources()
+        pendingUploadTask = Task {
             do {
                 let _ = try await BackendClient.shared.uploadMultiVector(multiRequest)
-                print("[InterestVectorManager] Multi-vector uploaded (music: \(musicGenres.count) genres, places: \(placePois.count) POIs, vibe: \(currentVector.count) dims)")
+                print("[InterestVectorManager] Multi-vector uploaded (music: \(musicGenres.count) genres, places: \(placePois.count) POIs, vibe: \(currentVectorSnapshot.count) dims)")
+            } catch is CancellationError {
+                return
             } catch {
+                if Task.isCancelled { return }
                 // Fallback: try legacy single-vector upload
                 let legacyRequest = ProfileVectorRequest(
-                    vector: currentVector,
+                    vector: currentVectorSnapshot,
                     quality: qualityString,
-                    activeSources: getActiveDataSources()
+                    activeSources: activeSourcesSnapshot
                 )
                 let _ = try? await BackendClient.shared.uploadVector(legacyRequest)
                 print("[InterestVectorManager] Multi-vector failed, legacy fallback: \(error.localizedDescription)")

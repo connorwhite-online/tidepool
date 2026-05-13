@@ -28,6 +28,7 @@ struct ProfileView: View {
     @State private var tempBirthday: Date = Calendar.current.date(byAdding: .year, value: -25, to: Date()) ?? Date()
     @State private var recentVisits: [VisitReport] = []
     @State private var isLoadingVisits = false
+    @State private var visitLoadTask: Task<Void, Never>? = nil
     @State private var pendingVersion: Int = 0
     @State private var showingAddHiddenPlace = false
     @State private var showingInsights = false
@@ -163,14 +164,21 @@ struct ProfileView: View {
         pendingVersion &+= 1
 
         guard BackendClient.shared.isAuthenticated else { return }
+        visitLoadTask?.cancel()
         isLoadingVisits = true
-        Task {
+        visitLoadTask = Task {
             do {
-                recentVisits = try await BackendClient.shared.getRecentVisits(limit: 50)
+                let visits = try await BackendClient.shared.getRecentVisits(limit: 50)
+                if Task.isCancelled { return }
+                recentVisits = visits
+            } catch is CancellationError {
+                return
             } catch {
                 print("[ProfileView] visit data fetch failed: \(error.localizedDescription)")
             }
-            isLoadingVisits = false
+            if !Task.isCancelled {
+                isLoadingVisits = false
+            }
         }
     }
 
