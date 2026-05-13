@@ -360,8 +360,6 @@ final class VisitDetector: NSObject {
     private func savePending() {
         guard let data = try? JSONEncoder().encode(pendingVisits) else { return }
         try? data.write(to: visitFileURL, options: .atomic)
-        // Also keep in UserDefaults for the UI to read count quickly
-        UserDefaults.standard.set(pendingVisits.count, forKey: "pending_visit_count")
     }
 
     private func loadPending() {
