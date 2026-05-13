@@ -84,9 +84,15 @@ final class HeatBlobOverlay: NSObject, MKOverlay {
     var boundingMapRect: MKMapRect { _boundingMapRect }
 }
 
+// Shared across overlay renderers — allocating these per draw was wasteful
+// because the map redraws constantly during pan/zoom.
+private let heatRendererColorSpace = CGColorSpaceCreateDeviceRGB()
+private let heatInnerBaseColor = UIColor(hex: "#9CE3A3") ?? .systemGreen
+private let heatOuterBaseColor = UIColor(hex: "#A6E4F8") ?? .systemTeal
+
 final class HeatBlobRenderer: MKOverlayRenderer {
-    private let innerColor = UIColor(hex: "#9CE3A3") ?? .systemGreen
-    private let outerColor = UIColor(hex: "#A6E4F8") ?? .systemTeal
+    private let innerColor = heatInnerBaseColor
+    private let outerColor = heatOuterBaseColor
     private let highContrast: Bool
 
     init(overlay: MKOverlay, highContrast: Bool) {
@@ -161,8 +167,7 @@ final class HeatBlobRenderer: MKOverlayRenderer {
                 outerColor.withAlphaComponent(min(1.0, outerAlpha)).cgColor
             ] as CFArray
             let locations: [CGFloat] = [0.0, 0.55, 1.0]
-            let colorSpace = CGColorSpaceCreateDeviceRGB()
-            if let gradient = CGGradient(colorsSpace: colorSpace, colors: colors, locations: locations) {
+            if let gradient = CGGradient(colorsSpace: heatRendererColorSpace, colors: colors, locations: locations) {
                 context.drawRadialGradient(
                     gradient,
                     startCenter: centroid, startRadius: 0,
@@ -200,8 +205,8 @@ final class HeatBlobRenderer: MKOverlayRenderer {
 final class HeatCircleRenderer: MKOverlayRenderer {
     private let circle: MKCircle
     private let intensity: CGFloat
-    private let innerColor = UIColor(hex: "#9CE3A3") ?? .systemGreen
-    private let outerColor = UIColor(hex: "#A6E4F8") ?? .systemTeal
+    private let innerColor = heatInnerBaseColor
+    private let outerColor = heatOuterBaseColor
     private let highContrast: Bool
 
     init(circle: MKCircle, intensity: CGFloat, highContrast: Bool) {
@@ -242,8 +247,7 @@ final class HeatCircleRenderer: MKOverlayRenderer {
             outerColor.withAlphaComponent(min(1.0, outerAlpha)).cgColor
         ] as CFArray
         let locations: [CGFloat] = [0.0, 0.55, 1.0]
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
-        if let gradient = CGGradient(colorsSpace: colorSpace, colors: colors, locations: locations) {
+        if let gradient = CGGradient(colorsSpace: heatRendererColorSpace, colors: colors, locations: locations) {
             context.drawRadialGradient(
                 gradient,
                 startCenter: centerPt, startRadius: 0,
