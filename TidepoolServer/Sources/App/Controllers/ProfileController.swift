@@ -171,15 +171,15 @@ struct ProfileController: RouteCollection {
     }
 
     /// Map raw token→weight pairs to a fixed-size vector using the global vocabulary table.
-    /// Bulk-fetches existing mappings first, then batch-inserts only new tokens.
+    /// Bulk-fetches existing mappings, bumps usage counts in one statement,
+    /// and bulk-inserts any new tokens in a single statement.
     private func buildVector(tokens: [String: Float], vectorType: String, maxDims: Int, sql: SQLDatabase) async throws -> [Float] {
         var vector = [Float](repeating: 0, count: maxDims)
         guard !tokens.isEmpty else { return vector }
 
         let tokenList = Array(tokens.keys)
 
-        // Bulk fetch existing token→dimension mappings
-        let placeholders = tokenList.enumerated().map { "($\($0.offset + 2))" }.joined(separator: ",")
+        // Bulk fetch existing token→dimension mappings.
         let existingRows = try await sql.raw(SQLQueryString("""
             SELECT token, dimension_index FROM vector_vocabularies
             WHERE vector_type = \(bind: vectorType) AND token = ANY(\(bind: tokenList))
@@ -190,7 +190,7 @@ struct ProfileController: RouteCollection {
             tokenToDim[row.token] = row.dimension_index
         }
 
-        // Update usage counts for existing tokens in one statement
+        // Bump usage counts for the existing tokens in one statement.
         if !tokenToDim.isEmpty {
             try await sql.raw(SQLQueryString("""
                 UPDATE vector_vocabularies SET usage_count = usage_count + 1
@@ -198,47 +198,52 @@ struct ProfileController: RouteCollection {
                 """)).run()
         }
 
-        // Insert new tokens (those not already in vocabulary)
+        // Assign dimension indices to new tokens and insert them all in a
+        // single statement. The previous version did one INSERT per new
+        // token, which was up to ~50 round-trips for a new user with a
+        // rich music library or POI history.
         let newTokens = tokenList.filter { tokenToDim[$0] == nil }
         if !newTokens.isEmpty {
-            // Get current max dimension index
             let maxRows = try await sql.raw(SQLQueryString("""
                 SELECT COALESCE(MAX(dimension_index), -1) as max_dim
                 FROM vector_vocabularies WHERE vector_type = \(bind: vectorType)
                 """)).all(decoding: MaxDimRow.self)
             var nextDim = (maxRows.first?.max_dim ?? -1) + 1
 
+            var tokensToInsert: [String] = []
+            var dimsToInsert: [Int] = []
             for token in newTokens {
-                if nextDim < maxDims {
-                    tokenToDim[token] = nextDim
-                    try await sql.raw(SQLQueryString("""
-                        INSERT INTO vector_vocabularies (vector_type, token, dimension_index, usage_count)
-                        VALUES (\(bind: vectorType), \(bind: token), \(bind: nextDim), 1)
-                        ON CONFLICT (vector_type, token) DO NOTHING
-                        """)).run()
-                    nextDim += 1
-                }
+                guard nextDim < maxDims else { break }
+                tokenToDim[token] = nextDim
+                tokensToInsert.append(token)
+                dimsToInsert.append(nextDim)
+                nextDim += 1
+            }
+
+            if !tokensToInsert.isEmpty {
+                try await sql.raw(SQLQueryString("""
+                    INSERT INTO vector_vocabularies (vector_type, token, dimension_index, usage_count)
+                    SELECT \(bind: vectorType), t.token, t.dim, 1
+                    FROM unnest(\(bind: tokensToInsert)::text[], \(bind: dimsToInsert)::int[]) AS t(token, dim)
+                    ON CONFLICT (vector_type, token) DO NOTHING
+                    """)).run()
             }
         }
 
-        // Build vector from mappings
+        // Build vector from mappings.
         for (token, weight) in tokens {
             if let dimIndex = tokenToDim[token], dimIndex < maxDims {
                 vector[dimIndex] = weight
             }
         }
 
-        // L2 normalize
+        // L2 normalize.
         let magnitude = sqrt(vector.map { $0 * $0 }.reduce(0, +))
         if magnitude > 0 {
             vector = vector.map { $0 / magnitude }
         }
 
         return vector
-    }
-
-    private struct DimRow: Decodable {
-        let dimension_index: Int
     }
 
     private struct TokenDimRow: Decodable {

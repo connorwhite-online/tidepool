@@ -72,12 +72,14 @@ struct TasteSummaryController: RouteCollection {
             generatedAt: ISO8601DateFormatter().string(from: Date())
         )
 
-        // Cache in Redis
+        // Cache in Redis atomically — separate SET+EXPIRE could leak a
+        // TTL-less key if we crash between the two.
         if let data = try? JSONEncoder().encode(response),
            let json = String(data: data, encoding: .utf8) {
-            _ = try? await req.redis.set(cacheKey, to: json).get()
-            _ = try? await req.redis.send(command: "EXPIRE", with: [
+            _ = try? await req.redis.send(command: "SET", with: [
                 .init(from: cacheKey.rawValue),
+                .init(from: json),
+                .init(from: "EX"),
                 .init(from: String(cacheTTLSeconds))
             ]).get()
         }
