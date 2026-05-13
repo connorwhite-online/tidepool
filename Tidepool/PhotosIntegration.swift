@@ -100,9 +100,6 @@ class PhotosIntegrationManager: ObservableObject {
             await self.fetchPhotoLocationsBackground()
         }.value
 
-        // Clear POI cache to get fresh results
-        userDefaults.removeObject(forKey: poiCacheKey)
-
         // Step 2: Build frequency grid and find hotspots (deterministic, pure math)
         let hotspots = await Task.detached(priority: .userInitiated) {
             self.findHotspots(photoLocations, metersPerCell: 30, minPhotos: 3)
@@ -273,8 +270,9 @@ class PhotosIntegrationManager: ObservableObject {
             }
         }
 
-        // Update cache
-        var newCache: [String: [String]] = [:]
+        // Merge new resolutions into the existing cache so previously-resolved
+        // hotspots stay cached even when they don't appear in this run.
+        var newCache: [String: [String]] = cache.mapValues { [$0.name, $0.category] }
         for cluster in results where cluster.inferredName != nil {
             let key = String(format: "%.4f_%.4f", cluster.centerCoordinate.latitude, cluster.centerCoordinate.longitude)
             newCache[key] = [cluster.inferredName!, cluster.category.rawValue]
