@@ -62,7 +62,18 @@ func configure(_ app: Application) async throws {
 
     // MARK: - JWT
 
-    let jwtSecret = Environment.get("JWT_SECRET") ?? "dev-secret-change-me"
+    // Outside the development environment, refuse to boot without an explicit
+    // JWT_SECRET so we can't accidentally ship a deployment that signs tokens
+    // with the placeholder dev key.
+    let jwtSecret: String
+    if let configured = Environment.get("JWT_SECRET") {
+        jwtSecret = configured
+    } else if app.environment == .development {
+        app.logger.warning("JWT_SECRET not set — using insecure development default")
+        jwtSecret = "dev-secret-change-me"
+    } else {
+        fatalError("JWT_SECRET must be set in \(app.environment.name)")
+    }
     app.jwt.signers.use(.hs256(key: jwtSecret))
 
     // MARK: - Middleware
