@@ -387,10 +387,15 @@ class SpotifyAPIClient {
         }
 
         // Build request
-        var components = URLComponents(string: baseURL + endpoint)!
+        guard var components = URLComponents(string: baseURL + endpoint) else {
+            throw SpotifyAPIError.invalidResponse
+        }
         components.queryItems = queryItems
+        guard let url = components.url else {
+            throw SpotifyAPIError.invalidResponse
+        }
 
-        var request = URLRequest(url: components.url!)
+        var request = URLRequest(url: url)
         request.setValue("Bearer \(credentials.accessToken)", forHTTPHeaderField: "Authorization")
 
         let (data, response) = try await URLSession.shared.data(for: request)
