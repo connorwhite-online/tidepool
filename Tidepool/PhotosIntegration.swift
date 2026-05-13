@@ -718,9 +718,9 @@ private class LocationClusterBuilder {
     }
     
     private var timeSpanDays: Double {
-        guard locations.count > 1 else { return 1.0 }
         let timestamps = locations.map { $0.timestamp }.sorted()
-        let span = timestamps.last!.timeIntervalSince(timestamps.first!)
+        guard let first = timestamps.first, let last = timestamps.last else { return 1.0 }
+        let span = last.timeIntervalSince(first)
         return max(span / (24 * 60 * 60), 1.0) // Convert to days, minimum 1 day
     }
     

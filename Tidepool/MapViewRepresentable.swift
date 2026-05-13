@@ -105,7 +105,7 @@ final class HeatBlobRenderer: MKOverlayRenderer {
 
             // Convert points to screen space
             let screenPoints: [CGPoint] = group.points.map { point(for: MKMapPoint($0)) }
-            guard screenPoints.count >= 3 else { continue }
+            guard screenPoints.count >= 3, let anchor = group.points.first else { continue }
 
             // Compute centroid (for gradient center)
             let centroid: CGPoint = {
@@ -116,9 +116,9 @@ final class HeatBlobRenderer: MKOverlayRenderer {
             }()
 
             // Approximate per-user radius in pixels using local latitude
-            let ppm = MKMapPointsPerMeterAtLatitude(group.points.first!.latitude)
+            let ppm = MKMapPointsPerMeterAtLatitude(anchor.latitude)
             let radiusMapPoints = group.perUserRadiusMeters * ppm
-            let centerMapPoint = MKMapPoint(group.points.first!)
+            let centerMapPoint = MKMapPoint(anchor)
             let edgeMapPoint = MKMapPoint(x: centerMapPoint.x + radiusMapPoints, y: centerMapPoint.y)
             let centerPt = point(for: centerMapPoint)
             let edgePt = point(for: edgeMapPoint)
