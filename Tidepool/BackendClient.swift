@@ -250,8 +250,7 @@ class BackendClient: ObservableObject {
 
         if let body {
             urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            let encoder = JSONEncoder()
-            urlRequest.httpBody = try encoder.encode(body)
+            urlRequest.httpBody = try await encodeOffMain(body)
         }
 
         let (data, response): (Data, URLResponse)
@@ -272,7 +271,7 @@ class BackendClient: ObservableObject {
                 return empty
             }
             do {
-                return try JSONDecoder().decode(Res.self, from: data)
+                return try await decodeOffMain(Res.self, from: data)
             } catch {
                 throw BackendError.decodingError(error)
             }
@@ -283,6 +282,17 @@ class BackendClient: ObservableObject {
             let message = String(data: data, encoding: .utf8)
             throw BackendError.serverError(httpResponse.statusCode, message)
         }
+    }
+
+    // Decode/encode hop off the main actor. Big payloads (heat tiles, visit
+    // batches, recommendations) were stalling the UI for hundreds of ms while
+    // JSONDecoder parsed on main.
+    nonisolated private func decodeOffMain<Res: Decodable>(_ type: Res.Type, from data: Data) async throws -> Res {
+        try JSONDecoder().decode(type, from: data)
+    }
+
+    nonisolated private func encodeOffMain<T: Encodable>(_ body: T) async throws -> Data {
+        try JSONEncoder().encode(body)
     }
 }
 
