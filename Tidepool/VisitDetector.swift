@@ -6,6 +6,7 @@ import TidepoolShared
 
 /// Detects real POI visits from CLVisit events and location dwell,
 /// snaps them to actual businesses, and batch-uploads to the server.
+@MainActor
 final class VisitDetector: NSObject {
     static let shared = VisitDetector()
 
@@ -25,6 +26,12 @@ final class VisitDetector: NSObject {
     private var dwellLocation: CLLocation?
     private var dwellStart: Date?
 
+    // Hidden-places cache so the exclusion check on every location update
+    // doesn't UserDefaults-read + JSON-decode. Keyed by raw Data so any
+    // write through @AppStorage invalidates it.
+    private var hiddenPlacesCacheKey: Data?
+    private var hiddenPlacesCache: [HiddenPlace] = []
+
     private let iso = ISO8601DateFormatter()
 
     static let bgTaskIdentifier = "studio.connorwhite.Tidepool.visitUpload"
@@ -42,9 +49,17 @@ final class VisitDetector: NSObject {
     // MARK: - Background Task Scheduling
 
     /// Register the background task handler. Call once at app launch.
-    func registerBackgroundTask() {
+    nonisolated func registerBackgroundTask() {
         BGTaskScheduler.shared.register(forTaskWithIdentifier: Self.bgTaskIdentifier, using: nil) { task in
-            self.handleBackgroundTask(task as! BGProcessingTask)
+            // BGTaskScheduler delivers callbacks on a private serial queue;
+            // hop to main so the @MainActor-isolated handler can run.
+            guard let bgTask = task as? BGProcessingTask else {
+                task.setTaskCompleted(success: false)
+                return
+            }
+            Task { @MainActor in
+                self.handleBackgroundTask(bgTask)
+            }
         }
     }
 
@@ -150,85 +165,168 @@ final class VisitDetector: NSObject {
 
     // MARK: - POI Snapping
 
+    /// MapKit candidate plus its computed score (higher = better fit).
+    private struct ScoredCandidate {
+        let item: MKMapItem
+        let distance: CLLocationDistance
+        let score: Double
+    }
+
     private func snapToPOI(location: CLLocation, arrivedAt: Date, departedAt: Date, confidence: Float, source: String) {
         Task {
-            let coord = location.coordinate
-
-            // Strategy 1: MapKit POI search (free, unlimited)
-            let poiResult = await withCheckedContinuation { (cont: CheckedContinuation<MKMapItem?, Never>) in
-                let request = MKLocalPointsOfInterestRequest(center: coord, radius: self.poiSearchRadiusMeters)
-                MKLocalSearch(request: request).start { response, _ in
-                    let radius = self.poiSearchRadiusMeters
-                    let best = response?.mapItems
-                        .compactMap { item -> (MKMapItem, CLLocationDistance)? in
-                            guard let d = item.placemark.location?.distance(from: location), d < radius else { return nil }
-                            return (item, d)
-                        }
-                        .min(by: { $0.1 < $1.1 })?
-                        .0
-                    cont.resume(returning: best)
-                }
-            }
-
-            if let poi = poiResult, let name = poi.name {
-                self.recordVisit(
-                    name: name,
-                    category: PlaceCategory.from(mapItem: poi),
-                    coordinate: poi.placemark.location?.coordinate ?? coord,
-                    arrivedAt: arrivedAt, departedAt: departedAt,
-                    confidence: confidence, source: source
-                )
-                return
-            }
-
-            // Strategy 2: Reverse geocode
-            let placemark = await withCheckedContinuation { (cont: CheckedContinuation<CLPlacemark?, Never>) in
-                CLGeocoder().reverseGeocodeLocation(location) { placemarks, _ in
-                    cont.resume(returning: placemarks?.first)
-                }
-            }
-
-            let geocodedName = placemark?.name ?? placemark?.thoroughfare ?? "Unknown location"
-            let looksLikeAddress = geocodedName.first?.isNumber == true
-
-            // If geocoder found a real name (not address), use it
-            if !looksLikeAddress {
-                let category = placemark.map { self.inferCategory(from: $0) } ?? .other
-                self.recordVisit(name: geocodedName, category: category, coordinate: coord,
-                                 arrivedAt: arrivedAt, departedAt: departedAt, confidence: confidence, source: source)
-                return
-            }
-
-            // Strategy 3: Foursquare via server (only when MapKit + geocode both failed)
-            if let detail = try? await BackendClient.shared.matchPlace(
-                name: "restaurant bar cafe",
-                lat: coord.latitude, lng: coord.longitude
-            ), let fsqCoord = detail.coordinates {
-                let fsqLoc = CLLocation(latitude: fsqCoord.latitude, longitude: fsqCoord.longitude)
-                if fsqLoc.distance(from: location) < 150 {
-                    let category = PlaceCategory(rawValue: detail.categories.first?.lowercased() ?? "") ?? .restaurant
-                    self.recordVisit(
-                        name: detail.name, category: category,
-                        coordinate: CLLocationCoordinate2D(latitude: fsqCoord.latitude, longitude: fsqCoord.longitude),
-                        arrivedAt: arrivedAt, departedAt: departedAt, confidence: confidence, source: source
-                    )
-                    return
-                }
-            }
-
-            // Last resort: record with address
-            self.recordVisit(name: geocodedName, category: .other, coordinate: coord,
-                             arrivedAt: arrivedAt, departedAt: departedAt, confidence: confidence, source: source)
+            await self.resolveAndRecord(
+                location: location, arrivedAt: arrivedAt, departedAt: departedAt,
+                confidence: confidence, source: source
+            )
         }
     }
 
-    private func recordVisit(name: String, category: PlaceCategory, coordinate: CLLocationCoordinate2D, arrivedAt: Date, departedAt: Date, confidence: Float, source: String) {
+    private func resolveAndRecord(location: CLLocation, arrivedAt: Date, departedAt: Date, confidence: Float, source: String) async {
+        let coord = location.coordinate
+
+        // Strategy 1: MapKit POI search, scored by dwell-fit × distance.
+        // This rejects transit stops, ATMs, parking, etc. that happen to be
+        // physically closer than the actual business the user dwelled at.
+        let mapKitTop = await scoredMapKitCandidates(near: coord, from: location).first
+
+        // Strategy 2: Google Places match. The backend's matchPlace is a Google
+        // Places query — its catalog is much better than MKLocalSearch for
+        // "places people review/visit", so use it as confirmation or override.
+        let googleSeedName = mapKitTop?.item.name ?? "place"
+        let googleMatch: PlaceDetail? = try? await BackendClient.shared.matchPlace(
+            name: googleSeedName,
+            lat: coord.latitude,
+            lng: coord.longitude
+        )
+
+        // Decide which source to trust.
+        if let google = googleMatch,
+           let g = google.coordinates {
+            let gLoc = CLLocation(latitude: g.latitude, longitude: g.longitude)
+            let gDistance = gLoc.distance(from: location)
+            // Trust Google if it's within the search radius and either MapKit
+            // agreed on the name or MapKit's pick was a low-dwell category.
+            let mapKitWeak = (mapKitTop.map { Self.dwellWeight(for: $0.item) } ?? 0) < 0.5
+            let namesMatch = mapKitTop?.item.name?.lowercased() == google.name.lowercased()
+            if gDistance <= poiSearchRadiusMeters && (namesMatch || mapKitWeak || mapKitTop == nil) {
+                let category = PlaceCategory(rawValue: google.categories.first?.lowercased() ?? "") ?? Self.category(for: mapKitTop?.item)
+                recordVisit(
+                    name: google.name, category: category,
+                    coordinate: CLLocationCoordinate2D(latitude: g.latitude, longitude: g.longitude),
+                    arrivedAt: arrivedAt, departedAt: departedAt,
+                    confidence: confidence, source: source,
+                    yelpID: google.yelpID
+                )
+                return
+            }
+        }
+
+        if let mk = mapKitTop, let name = mk.item.name {
+            recordVisit(
+                name: name,
+                category: Self.category(for: mk.item),
+                coordinate: mk.item.placemark.location?.coordinate ?? coord,
+                arrivedAt: arrivedAt, departedAt: departedAt,
+                confidence: confidence, source: source,
+                yelpID: nil
+            )
+            return
+        }
+
+        // Strategy 3: Reverse geocode fallback.
+        let placemark = await withCheckedContinuation { (cont: CheckedContinuation<CLPlacemark?, Never>) in
+            CLGeocoder().reverseGeocodeLocation(location) { placemarks, _ in
+                cont.resume(returning: placemarks?.first)
+            }
+        }
+
+        let geocodedName = placemark?.name ?? placemark?.thoroughfare ?? "Unknown location"
+        let looksLikeAddress = geocodedName.first?.isNumber == true
+
+        if !looksLikeAddress {
+            let category = placemark.map { self.inferCategory(from: $0) } ?? .other
+            recordVisit(
+                name: geocodedName, category: category, coordinate: coord,
+                arrivedAt: arrivedAt, departedAt: departedAt,
+                confidence: confidence, source: source, yelpID: nil
+            )
+            return
+        }
+
+        // Last resort: address string.
+        recordVisit(
+            name: geocodedName, category: .other, coordinate: coord,
+            arrivedAt: arrivedAt, departedAt: departedAt,
+            confidence: confidence, source: source, yelpID: nil
+        )
+    }
+
+    /// Query MKLocalPointsOfInterest and score each result by dwell-fit so
+    /// transit/parking/ATM landmarks don't beat the actual storefront the
+    /// user was at. Returned in descending score order.
+    private func scoredMapKitCandidates(near coord: CLLocationCoordinate2D, from location: CLLocation) async -> [ScoredCandidate] {
+        let radius = poiSearchRadiusMeters
+        return await withCheckedContinuation { (cont: CheckedContinuation<[ScoredCandidate], Never>) in
+            let request = MKLocalPointsOfInterestRequest(center: coord, radius: radius)
+            MKLocalSearch(request: request).start { response, _ in
+                let scored: [ScoredCandidate] = (response?.mapItems ?? [])
+                    .compactMap { item in
+                        guard item.name != nil,
+                              let d = item.placemark.location?.distance(from: location),
+                              d <= radius else { return nil }
+                        let weight = Self.dwellWeight(for: item)
+                        // Heavily penalise out-of-range or zero-weight (filter-style)
+                        // and let close, high-dwell items dominate.
+                        let proximity = max(0.0, 1.0 - d / radius)
+                        return ScoredCandidate(item: item, distance: d, score: proximity * weight)
+                    }
+                    .filter { $0.score > 0 }
+                    .sorted { $0.score > $1.score }
+                cont.resume(returning: scored)
+            }
+        }
+    }
+
+    /// 0.0–1.0 weight expressing how plausible a 5+ minute dwell is at this
+    /// kind of place. Transit/parking/ATMs are near-zero; cafes/restaurants/
+    /// stores/parks/gyms/hotels are full weight.
+    private static func dwellWeight(for item: MKMapItem) -> Double {
+        guard let category = item.pointOfInterestCategory else { return 0.7 }
+        switch category {
+        case .cafe, .restaurant, .foodMarket,
+             .nightlife,
+             .store,
+             .park, .beach, .nationalPark, .campground,
+             .movieTheater, .theater, .museum,
+             .fitnessCenter,
+             .hotel,
+             .school, .university, .library,
+             .stadium, .amusementPark, .aquarium, .zoo, .marina,
+             .hospital:
+            return 1.0
+        case .bank, .postOffice, .laundry, .pharmacy:
+            return 0.5
+        case .gasStation, .atm, .restroom, .evCharger, .parking,
+             .airport, .publicTransport,
+             .police, .fireStation:
+            return 0.05
+        default:
+            return 0.7
+        }
+    }
+
+    private static func category(for item: MKMapItem?) -> PlaceCategory {
+        guard let item else { return .other }
+        return PlaceCategory.from(mapItem: item)
+    }
+
+    private func recordVisit(name: String, category: PlaceCategory, coordinate: CLLocationCoordinate2D, arrivedAt: Date, departedAt: Date, confidence: Float, source: String, yelpID: String?) {
         let calendar = Calendar.current
         let poiId = FavoriteLocation.stablePlaceId(name: name, coordinate: coordinate)
 
         let report = VisitReport(
             poiId: poiId,
-            yelpId: nil,
+            yelpId: yelpID,
             name: name,
             category: TidepoolShared.PlaceCategory(rawValue: category.rawValue) ?? .other,
             latitude: coordinate.latitude,
@@ -246,45 +344,29 @@ final class VisitDetector: NSObject {
         appendDedupe(report)
         savePending()
         flushToServer()
-
-        // Try Yelp match in background
-        Task {
-            if let match = try? await BackendClient.shared.matchPlace(
-                name: name, lat: coordinate.latitude, lng: coordinate.longitude
-            ) {
-                if let idx = self.pendingVisits.lastIndex(where: { $0.name == name && $0.yelpId == nil }) {
-                    let old = self.pendingVisits[idx]
-                    self.pendingVisits[idx] = VisitReport(
-                        poiId: old.poiId, yelpId: match.yelpID, name: old.name,
-                        category: old.category, latitude: old.latitude, longitude: old.longitude,
-                        arrivedAt: old.arrivedAt, departedAt: old.departedAt,
-                        dayOfWeek: old.dayOfWeek, hourOfDay: old.hourOfDay,
-                        durationMinutes: old.durationMinutes, confidence: old.confidence, source: old.source
-                    )
-                    self.savePending()
-                }
-            }
-        }
     }
 
     /// Check if a location falls within any exclusion zone (home + hidden places).
     private func isInExclusionZone(_ location: CLLocation) -> Bool {
-        // Home check
         if let home = homeLocation {
             let homeCL = CLLocation(latitude: home.latitude, longitude: home.longitude)
             if location.distance(from: homeCL) < homeHideRadiusMeters { return true }
         }
 
-        // Hidden places check
-        if let data = UserDefaults.standard.data(forKey: "hidden_places_data"),
-           let places = try? JSONDecoder().decode([HiddenPlace].self, from: data) {
-            for place in places {
-                let placeCL = CLLocation(latitude: place.latitude, longitude: place.longitude)
-                if location.distance(from: placeCL) < homeHideRadiusMeters { return true }
-            }
+        for place in hiddenPlaces() {
+            let placeCL = CLLocation(latitude: place.latitude, longitude: place.longitude)
+            if location.distance(from: placeCL) < homeHideRadiusMeters { return true }
         }
 
         return false
+    }
+
+    private func hiddenPlaces() -> [HiddenPlace] {
+        let data = UserDefaults.standard.data(forKey: "hidden_places_data") ?? Data()
+        if data == hiddenPlacesCacheKey { return hiddenPlacesCache }
+        hiddenPlacesCacheKey = data
+        hiddenPlacesCache = (try? JSONDecoder().decode([HiddenPlace].self, from: data)) ?? []
+        return hiddenPlacesCache
     }
 
     private func inferCategory(from placemark: CLPlacemark) -> PlaceCategory {

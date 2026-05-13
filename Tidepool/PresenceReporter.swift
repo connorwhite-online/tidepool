@@ -2,6 +2,7 @@ import Foundation
 import CoreLocation
 import TidepoolShared
 
+@MainActor
 final class PresenceReporter {
     private weak var locationManager: LocationManager?
     private var timer: Timer?

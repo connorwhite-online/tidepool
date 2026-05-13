@@ -1,6 +1,7 @@
 import Foundation
 import CoreLocation
 
+@MainActor
 final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelegate {
     @Published var authorizationStatus: CLAuthorizationStatus = .notDetermined
     @Published var latestLocation: CLLocation?
