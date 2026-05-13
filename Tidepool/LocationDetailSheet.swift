@@ -182,24 +182,20 @@ private struct LocationDetailContent: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
                         ForEach(photos.prefix(5), id: \.url) { photo in
-                            AsyncImage(url: photo.url) { phase in
-                                switch phase {
-                                case .success(let image):
-                                    image
-                                        .resizable()
-                                        .aspectRatio(contentMode: .fill)
-                                        .frame(width: 140, height: 100)
-                                        .clipShape(RoundedRectangle(cornerRadius: 10))
-                                case .failure:
-                                    RoundedRectangle(cornerRadius: 10)
-                                        .fill(.quaternary)
-                                        .frame(width: 140, height: 100)
-                                default:
-                                    RoundedRectangle(cornerRadius: 10)
-                                        .fill(.quaternary)
-                                        .frame(width: 140, height: 100)
-                                        .overlay(ProgressView().tint(.secondary))
-                                }
+                            RemoteImage(
+                                url: photo.url,
+                                targetSize: CGSize(width: 140, height: 100)
+                            ) { image in
+                                image
+                                    .resizable()
+                                    .aspectRatio(contentMode: .fill)
+                                    .frame(width: 140, height: 100)
+                                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                            } placeholder: {
+                                RoundedRectangle(cornerRadius: 10)
+                                    .fill(.quaternary)
+                                    .frame(width: 140, height: 100)
+                                    .overlay(ProgressView().tint(.secondary))
                             }
                         }
                     }
