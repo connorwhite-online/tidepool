@@ -48,10 +48,6 @@ struct SpotifyArtist: Codable, Identifiable {
     let genres: [String]
     let popularity: Int
     let images: [SpotifyImage]?
-
-    var smallestImageURL: String? {
-        images?.min(by: { ($0.width ?? 0) < ($1.width ?? 0) })?.url
-    }
 }
 
 struct SpotifyAlbum: Codable {
