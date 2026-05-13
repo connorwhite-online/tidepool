@@ -165,13 +165,6 @@ final class VisitDetector: NSObject {
 
     // MARK: - POI Snapping
 
-    /// MapKit candidate plus its computed score (higher = better fit).
-    private struct ScoredCandidate {
-        let item: MKMapItem
-        let distance: CLLocationDistance
-        let score: Double
-    }
-
     private func snapToPOI(location: CLLocation, arrivedAt: Date, departedAt: Date, confidence: Float, source: String) {
         Task {
             await self.resolveAndRecord(
@@ -187,7 +180,7 @@ final class VisitDetector: NSObject {
         // Strategy 1: MapKit POI search, scored by dwell-fit × distance.
         // This rejects transit stops, ATMs, parking, etc. that happen to be
         // physically closer than the actual business the user dwelled at.
-        let mapKitTop = await scoredMapKitCandidates(near: coord, from: location).first
+        let mapKitTop = await POIScoring.scoredCandidates(near: coord, radius: poiSearchRadiusMeters).first
 
         // Strategy 2: Google Places match. The backend's matchPlace is a Google
         // Places query — its catalog is much better than MKLocalSearch for
@@ -206,7 +199,7 @@ final class VisitDetector: NSObject {
             let gDistance = gLoc.distance(from: location)
             // Trust Google if it's within the search radius and either MapKit
             // agreed on the name or MapKit's pick was a low-dwell category.
-            let mapKitWeak = (mapKitTop.map { Self.dwellWeight(for: $0.item) } ?? 0) < 0.5
+            let mapKitWeak = (mapKitTop.map { POIScoring.dwellWeight(for: $0.item) } ?? 0) < 0.5
             let namesMatch = mapKitTop?.item.name?.lowercased() == google.name.lowercased()
             if gDistance <= poiSearchRadiusMeters && (namesMatch || mapKitWeak || mapKitTop == nil) {
                 let category = PlaceCategory(rawValue: google.categories.first?.lowercased() ?? "") ?? Self.category(for: mapKitTop?.item)
@@ -259,60 +252,6 @@ final class VisitDetector: NSObject {
             arrivedAt: arrivedAt, departedAt: departedAt,
             confidence: confidence, source: source, yelpID: nil
         )
-    }
-
-    /// Query MKLocalPointsOfInterest and score each result by dwell-fit so
-    /// transit/parking/ATM landmarks don't beat the actual storefront the
-    /// user was at. Returned in descending score order.
-    private func scoredMapKitCandidates(near coord: CLLocationCoordinate2D, from location: CLLocation) async -> [ScoredCandidate] {
-        let radius = poiSearchRadiusMeters
-        return await withCheckedContinuation { (cont: CheckedContinuation<[ScoredCandidate], Never>) in
-            let request = MKLocalPointsOfInterestRequest(center: coord, radius: radius)
-            MKLocalSearch(request: request).start { response, _ in
-                let scored: [ScoredCandidate] = (response?.mapItems ?? [])
-                    .compactMap { item in
-                        guard item.name != nil,
-                              let d = item.placemark.location?.distance(from: location),
-                              d <= radius else { return nil }
-                        let weight = Self.dwellWeight(for: item)
-                        // Heavily penalise out-of-range or zero-weight (filter-style)
-                        // and let close, high-dwell items dominate.
-                        let proximity = max(0.0, 1.0 - d / radius)
-                        return ScoredCandidate(item: item, distance: d, score: proximity * weight)
-                    }
-                    .filter { $0.score > 0 }
-                    .sorted { $0.score > $1.score }
-                cont.resume(returning: scored)
-            }
-        }
-    }
-
-    /// 0.0–1.0 weight expressing how plausible a 5+ minute dwell is at this
-    /// kind of place. Transit/parking/ATMs are near-zero; cafes/restaurants/
-    /// stores/parks/gyms/hotels are full weight.
-    private static func dwellWeight(for item: MKMapItem) -> Double {
-        guard let category = item.pointOfInterestCategory else { return 0.7 }
-        switch category {
-        case .cafe, .restaurant, .foodMarket,
-             .nightlife,
-             .store,
-             .park, .beach, .nationalPark, .campground,
-             .movieTheater, .theater, .museum,
-             .fitnessCenter,
-             .hotel,
-             .school, .university, .library,
-             .stadium, .amusementPark, .aquarium, .zoo, .marina,
-             .hospital:
-            return 1.0
-        case .bank, .postOffice, .laundry, .pharmacy:
-            return 0.5
-        case .gasStation, .atm, .restroom, .evCharger, .parking,
-             .airport, .publicTransport,
-             .police, .fireStation:
-            return 0.05
-        default:
-            return 0.7
-        }
     }
 
     private static func category(for item: MKMapItem?) -> PlaceCategory {
