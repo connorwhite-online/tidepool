@@ -1,6 +1,7 @@
 import Vapor
 import JWT
 import Fluent
+import Crypto
 import TidepoolShared
 
 struct AuthController: RouteCollection {
@@ -110,9 +111,13 @@ extension AuthResponse: @retroactive Content {}
 // MARK: - Helpers
 
 extension String {
+    /// A stable, full SHA-256 hex digest of the string's UTF-8 bytes.
+    /// Used to fingerprint the App Attest attestation object so we can
+    /// detect replays across server restarts and processes — Swift's
+    /// built-in Hasher is process-salted and only 64 bits, which would
+    /// silently break that.
     var sha256Hash: String {
-        var hasher = Hasher()
-        hasher.combine(self)
-        return String(format: "%016x", hasher.finalize())
+        let digest = SHA256.hash(data: Data(self.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
     }
 }
