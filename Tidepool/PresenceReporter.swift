@@ -65,6 +65,12 @@ final class PresenceReporter {
 
         lastReportAtForTile[tileString] = now
 
+        // Prune entries that are well past the throttle window — they can no
+        // longer suppress anything and the dictionary would otherwise grow
+        // unbounded over a long-lived session.
+        let staleBefore = now.addingTimeInterval(-perTileMinIntervalSec * 2)
+        lastReportAtForTile = lastReportAtForTile.filter { $0.value > staleBefore }
+
         let epochMs = Int64(now.timeIntervalSince1970 * 1000)
         let jitterMs = Int.random(in: 0...(Int(maxIntervalSec * 1000)))
         let report = PresenceReport(tileID: tileString, epochMs: epochMs, clientJitterMs: jitterMs)
