@@ -5,6 +5,10 @@ import SQLKit
 import TidepoolShared
 
 struct RecommendationController: RouteCollection {
+    /// 5 minutes — fresh enough that newly-onboarded similar users surface
+    /// quickly but long enough to absorb repeated For You panel opens.
+    private let responseCacheTTL = 300
+
     func boot(routes: RoutesBuilder) throws {
         routes.post(use: getRecommendations)
     }
@@ -21,36 +25,14 @@ struct RecommendationController: RouteCollection {
         let deviceIDStr = payload.deviceID.uuidString
         let limit = body.limit ?? 20
 
-        // Get similar users from Redis cache or compute
-        let cacheKey = RedisKey("aligned:\(deviceIDStr)")
-        let cached = try? await req.redis.send(command: "SMEMBERS", with: [
-            .init(from: cacheKey.rawValue)
-        ]).get()
-
-        var similarIDs: [String] = []
-        if let cached, let members = cached.array, !members.isEmpty {
-            similarIDs = members.compactMap { $0.string }
-        } else {
-            // Fallback: compute similarity inline
-            let rows = try await sql.raw(SQLQueryString("""
-                SELECT p2.device_id::text as device_id
-                FROM device_profiles p1
-                CROSS JOIN device_profiles p2
-                WHERE p1.device_id = '\(unsafeRaw: deviceIDStr)'::uuid
-                  AND p2.device_id != '\(unsafeRaw: deviceIDStr)'::uuid
-                  AND p2.quality != 'poor'
-                ORDER BY
-                    CASE
-                        WHEN p1.places_vector IS NOT NULL AND p2.places_vector IS NOT NULL
-                        THEN 0.5 * (p1.places_vector <=> p2.places_vector)
-                             + 0.3 * COALESCE(p1.music_vector <=> p2.music_vector, 1)
-                             + 0.2 * COALESCE(p1.vibe_vector <=> p2.vibe_vector, 1)
-                        ELSE p1.interest_vector <=> p2.interest_vector
-                    END
-                LIMIT 50
-                """)).all(decoding: DeviceIDRow.self)
-            similarIDs = rows.map { $0.device_id }
+        // Response cache — the heavy aggregate query is the bulk of the cost
+        // and the result varies only by (device, day_of_week, hour-bucket).
+        let responseCacheKey = "rec:\(deviceIDStr):\(body.currentDayOfWeek):\(body.currentHour)"
+        if let cached = try? await req.redis.get(RedisKey(responseCacheKey), asJSON: RecommendationResponse.self) {
+            return cached
         }
+
+        let similarIDs = try await loadSimilarUserIDs(deviceID: deviceIDStr, sql: sql, req: req)
 
         guard !similarIDs.isEmpty else {
             return RecommendationResponse(recommendations: [])
@@ -100,10 +82,79 @@ struct RecommendationController: RouteCollection {
             )
         }
 
-        return RecommendationResponse(recommendations: recommendations)
+        let response = RecommendationResponse(recommendations: recommendations)
+
+        // Atomic SET ... EX so we never leak a TTL-less cache entry on crash.
+        if let data = try? JSONEncoder().encode(response),
+           let json = String(data: data, encoding: .utf8) {
+            _ = try? await req.redis.send(command: "SET", with: [
+                .init(from: responseCacheKey),
+                .init(from: json),
+                .init(from: "EX"),
+                .init(from: String(responseCacheTTL))
+            ]).get()
+        }
+
+        return response
     }
 
-    private struct DeviceIDRow: Decodable { let device_id: String }
+    /// Reads the similar-users list from the Redis cache that
+    /// AlignedHeatController populates (aligned_sim:<deviceID>). Falls back
+    /// to the inline pgvector CROSS JOIN for new users and seeds the cache
+    /// so the next caller from either endpoint hits warm.
+    ///
+    /// Pre-fix this controller read from `aligned:<deviceID>` via SMEMBERS,
+    /// but nothing in the codebase ever wrote to that key — every request
+    /// silently fell through to the heavy fallback query.
+    private func loadSimilarUserIDs(deviceID: String, sql: SQLDatabase, req: Request) async throws -> [String] {
+        let cacheKey = "aligned_sim:\(deviceID)"
+        if let cached = try? await req.redis.get(RedisKey(cacheKey), asJSON: [CachedSim].self) {
+            return cached.map { $0.id }
+        }
+
+        let rows = try await sql.raw(SQLQueryString("""
+            SELECT p2.device_id::text as device_id,
+                   CASE
+                       WHEN p1.places_vector IS NOT NULL AND p2.places_vector IS NOT NULL
+                       THEN 1.0 - (0.5 * (p1.places_vector <=> p2.places_vector)
+                                   + 0.3 * COALESCE(p1.music_vector <=> p2.music_vector, 1)
+                                   + 0.2 * COALESCE(p1.vibe_vector <=> p2.vibe_vector, 1))
+                       ELSE 1.0 - (p1.interest_vector <=> p2.interest_vector)
+                   END as similarity
+            FROM device_profiles p1
+            CROSS JOIN device_profiles p2
+            WHERE p1.device_id = '\(unsafeRaw: deviceID)'::uuid
+              AND p2.device_id != '\(unsafeRaw: deviceID)'::uuid
+              AND p2.quality != 'poor'
+            ORDER BY similarity DESC
+            LIMIT 50
+            """)).all(decoding: SimilarRow.self)
+
+        let cacheable = rows.map { CachedSim(id: $0.device_id, similarity: Float($0.similarity)) }
+        if !cacheable.isEmpty,
+           let data = try? JSONEncoder().encode(cacheable),
+           let json = String(data: data, encoding: .utf8) {
+            _ = try? await req.redis.send(command: "SET", with: [
+                .init(from: cacheKey),
+                .init(from: json),
+                .init(from: "EX"),
+                .init(from: "900") // matches AlignedHeatController.similarCacheTTL
+            ]).get()
+        }
+
+        return rows.map { $0.device_id }
+    }
+
+    private struct SimilarRow: Decodable {
+        let device_id: String
+        let similarity: Double
+    }
+
+    private struct CachedSim: Codable {
+        let id: String
+        let similarity: Float
+    }
+
     private struct RecommendationRow: Decodable {
         let poi_id: String?
         let yelp_id: String?
