@@ -218,43 +218,6 @@ class InAppFavoritesManager: ObservableObject {
         HapticFeedbackManager.shared.impact(.medium)
     }
     
-    func updateFavorite(_ favorite: FavoriteLocation, rating: Int? = nil, notes: String? = nil, tags: [String]? = nil) {
-        guard let index = favorites.firstIndex(where: { $0.id == favorite.id }) else { return }
-        
-        let updatedFavorite = FavoriteLocation(
-            placeId: favorite.placeId,
-            name: favorite.name,
-            category: favorite.category,
-            coordinate: favorite.coordinate,
-            rating: rating ?? favorite.rating,
-            notes: notes ?? favorite.notes,
-            tags: tags ?? favorite.tags
-        )
-        
-        favorites[index] = updatedFavorite
-        saveFavorites()
-    }
-    
-    func recordVisit(for placeId: String) {
-        guard let index = favorites.firstIndex(where: { $0.placeId == placeId }) else { return }
-        
-        let favorite = favorites[index]
-        let updatedFavorite = FavoriteLocation(
-            placeId: favorite.placeId,
-            name: favorite.name,
-            category: favorite.category,
-            coordinate: favorite.coordinate,
-            rating: favorite.rating,
-            notes: favorite.notes,
-            tags: favorite.tags
-        )
-        
-        // This would be a more complex update in a real implementation
-        // For now, just increment visit count conceptually
-        favorites[index] = updatedFavorite
-        saveFavorites()
-    }
-    
     func isFavorited(_ placeId: String) -> Bool {
         return favorites.contains { $0.placeId == placeId }
     }

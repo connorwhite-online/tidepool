@@ -162,20 +162,6 @@ struct MusicGenreMapper {
         return "artist:\(normalized)"
     }
 
-    /// Maps multiple genres and returns aggregated tags with counts
-    static func mapGenresToTagCounts(_ genres: [String], baseWeight: Int = 1) -> [String: Int] {
-        var tagCounts: [String: Int] = [:]
-
-        for genre in genres {
-            let tags = mapGenreToTags(genre)
-            for tag in tags {
-                tagCounts[tag, default: 0] += baseWeight
-            }
-        }
-
-        return tagCounts
-    }
-
     // MARK: - Private Methods
 
     /// Normalizes a genre string for tokenization
