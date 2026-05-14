@@ -362,16 +362,18 @@ class InterestVectorManager: ObservableObject {
     }
     
     private func calculateDiversityScore() -> Float {
-        // Shannon entropy as a measure of interest diversity
-        let nonZeroWeights = currentVector.filter { $0 > 0 }
-        guard !nonZeroWeights.isEmpty else { return 0.0 }
-        
-        let entropy = nonZeroWeights.map { weight in
-            weight * logf(weight)
-        }.reduce(0, +) * -1
-        
-        // Normalize to 0-1 scale
-        let maxEntropy = logf(Float(nonZeroWeights.count))
+        // Shannon entropy in a single pass — was three (filter, map, reduce)
+        // and lived behind a published-state observer that fires on a lot of
+        // unrelated state changes.
+        var entropy: Float = 0
+        var nonZeroCount = 0
+        for weight in currentVector where weight > 0 {
+            entropy -= weight * logf(weight)
+            nonZeroCount += 1
+        }
+        guard nonZeroCount > 0 else { return 0.0 }
+
+        let maxEntropy = logf(Float(nonZeroCount))
         return maxEntropy > 0 ? entropy / maxEntropy : 0.0
     }
     
