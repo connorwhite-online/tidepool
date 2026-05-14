@@ -6,16 +6,12 @@ struct BackgroundScheduler: LifecycleHandler {
     func didBoot(_ app: Application) throws {
         app.logger.info("[BackgroundScheduler] Starting background loops (computation deferred)...")
 
-        // Tidepool computation loop — wrapped in do/catch to never crash the server
+        // Tidepool computation loop. Inner async work swallows its own
+        // errors via try?, so a do/catch here would be unreachable.
         Task {
             try? await Task.sleep(nanoseconds: 60_000_000_000) // 60s initial delay
-
             while !Task.isCancelled {
-                do {
-                    await runTidepoolComputation(app: app)
-                } catch {
-                    app.logger.error("[BackgroundScheduler] Tidepool computation error: \(error)")
-                }
+                await runTidepoolComputation(app: app)
                 try? await Task.sleep(nanoseconds: 3600_000_000_000) // 1 hour
             }
         }
@@ -23,13 +19,8 @@ struct BackgroundScheduler: LifecycleHandler {
         // Stale user check loop
         Task {
             try? await Task.sleep(nanoseconds: 120_000_000_000) // 2 min initial delay
-
             while !Task.isCancelled {
-                do {
-                    await recomputeStaleUsers(app: app)
-                } catch {
-                    app.logger.error("[BackgroundScheduler] Stale user check error: \(error)")
-                }
+                await recomputeStaleUsers(app: app)
                 try? await Task.sleep(nanoseconds: 300_000_000_000) // 5 min
             }
         }
