@@ -20,6 +20,13 @@ class InterestVectorManager: ObservableObject {
 
     // Canonical vocabulary shared between client and server (from TidepoolShared)
     private let vocabulary = InterestVocabulary.tags
+    // O(1) lookups for aggregateTagsFromAllSources and vectorFromTags. Without
+    // these, the aggregate loop did Array.contains (O(vocabulary)) per source
+    // per tag — at six sources and ~100 tags each that was ~78k comparisons
+    // per computeVector() call.
+    private let vocabularyIndex: [String: Int] = Dictionary(
+        uniqueKeysWithValues: InterestVocabulary.tags.enumerated().map { ($1, $0) }
+    )
 
     // Outstanding upload — cancelled when a newer computeVector() supersedes it
     // so rapid recomputes don't pile up requests on slow networks.
@@ -182,65 +189,23 @@ class InterestVectorManager: ObservableObject {
             "photos": 0.6         // Medium weight - inferred from behavior
         ]
 
-        // Aggregate from in-app favorites (highest priority)
-        let favoritesTags = favoritesManager.getInterestTags()
-        for (tag, count) in favoritesTags {
-            let normalizedTag = normalizeTag(tag)
-            if vocabulary.contains(normalizedTag) {
-                aggregatedTags[normalizedTag, default: 0] += Float(count) * sourceWeights["favorites"]!
-            }
-        }
-
-        // Aggregate from Spotify (if connected)
-        if let spotifyManager = spotifyManager {
-            let spotifyTags = spotifyManager.getInterestTags()
-            for (tag, count) in spotifyTags {
+        func merge(_ tags: [String: Int], weight: Float) {
+            for (tag, count) in tags {
                 let normalizedTag = normalizeTag(tag)
-                if vocabulary.contains(normalizedTag) {
-                    aggregatedTags[normalizedTag, default: 0] += Float(count) * sourceWeights["spotify"]!
+                if vocabularyIndex[normalizedTag] != nil {
+                    aggregatedTags[normalizedTag, default: 0] += Float(count) * weight
                 }
             }
         }
 
-        // Aggregate from Apple Music (if connected)
-        if let appleMusicManager = appleMusicManager {
-            let appleMusicTags = appleMusicManager.getInterestTags()
-            for (tag, count) in appleMusicTags {
-                let normalizedTag = normalizeTag(tag)
-                if vocabulary.contains(normalizedTag) {
-                    aggregatedTags[normalizedTag, default: 0] += Float(count) * sourceWeights["apple_music"]!
-                }
-            }
-        }
-
-        // Aggregate from Apple Maps saved locations
-        let appleMapsTagCounts = appleMapsManager.getInterestTags()
-        for (tag, count) in appleMapsTagCounts {
-            let normalizedTag = normalizeTag(tag)
-            if vocabulary.contains(normalizedTag) {
-                aggregatedTags[normalizedTag, default: 0] += Float(count) * sourceWeights["apple_maps"]!
-            }
-        }
-
-        // Aggregate from Photos analysis
-        let photosTagCounts = photosManager.getInterestTags()
-        for (tag, count) in photosTagCounts {
-            let normalizedTag = normalizeTag(tag)
-            if vocabulary.contains(normalizedTag) {
-                aggregatedTags[normalizedTag, default: 0] += Float(count) * sourceWeights["photos"]!
-            }
-        }
-
-        // Aggregate from Age Range (if set) - high weight for filtering
-        if let ageRangeManager = ageRangeManager, ageRangeManager.isAuthorized {
-            let ageRangeTags = ageRangeManager.getInterestTags()
-            for (tag, count) in ageRangeTags {
-                let normalizedTag = normalizeTag(tag)
-                if vocabulary.contains(normalizedTag) {
-                    // Age range tags can be negative (to deprioritize adult venues for minors)
-                    aggregatedTags[normalizedTag, default: 0] += Float(count)
-                }
-            }
+        merge(favoritesManager.getInterestTags(), weight: sourceWeights["favorites"]!)
+        if let spotifyManager { merge(spotifyManager.getInterestTags(), weight: sourceWeights["spotify"]!) }
+        if let appleMusicManager { merge(appleMusicManager.getInterestTags(), weight: sourceWeights["apple_music"]!) }
+        merge(appleMapsManager.getInterestTags(), weight: sourceWeights["apple_maps"]!)
+        merge(photosManager.getInterestTags(), weight: sourceWeights["photos"]!)
+        // Age range tags can be negative (to deprioritize adult venues for minors)
+        if let ageRangeManager, ageRangeManager.isAuthorized {
+            merge(ageRangeManager.getInterestTags(), weight: 1.0)
         }
 
         return aggregatedTags
@@ -250,23 +215,19 @@ class InterestVectorManager: ObservableObject {
         guard !tagCounts.isEmpty else {
             return Array(repeating: 0.0, count: vocabulary.count)
         }
-        
-        // Create vector with TF-IDF-like scoring
+
+        // Create vector with TF-IDF-like scoring. Iterate tagCounts (typically
+        // smaller than the 130-entry vocabulary) and look up the slot via
+        // vocabularyIndex instead of scanning the vocabulary for every tag.
         var vector: [Float] = Array(repeating: 0.0, count: vocabulary.count)
         let totalTags = tagCounts.values.reduce(0, +)
-        
-        for (index, tag) in vocabulary.enumerated() {
-            if let count = tagCounts[tag] {
-                // Term frequency (normalized)
-                let tf = count / totalTags
-                
-                // Inverse document frequency simulation
-                // For now, we'll use a simple frequency-based approach
-                // In a full implementation, this would use actual corpus statistics
-                let idf = logf(Float(vocabulary.count) / max(1.0, count))
-                
-                vector[index] = tf * idf
-            }
+        let vocabSize = Float(vocabulary.count)
+
+        for (tag, count) in tagCounts {
+            guard let index = vocabularyIndex[tag] else { continue }
+            let tf = count / totalTags
+            let idf = logf(vocabSize / max(1.0, count))
+            vector[index] = tf * idf
         }
         
         // Normalize vector to unit length
