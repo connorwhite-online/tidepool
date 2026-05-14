@@ -4,6 +4,13 @@ import Photos
 import Combine
 import TidepoolShared
 
+// Hoisted formatters — both are thread-safe and configuration-free, so
+// per-call instantiation in body-side computed properties was pure waste.
+// The check-ins list re-renders frequently and was paying allocation cost
+// per row per refresh.
+private let sharedISO8601Formatter = ISO8601DateFormatter()
+private let sharedRelativeDateFormatter = RelativeDateTimeFormatter()
+
 struct ProfileView: View {
     @Environment(\.dismiss) private var dismiss
     @AppStorage("photos_opt_in") private var photosOptIn: Bool = false
@@ -184,7 +191,7 @@ struct ProfileView: View {
 
     private var allCheckIns: [CheckInItem] {
         _ = pendingVersion // re-evaluate when pending changes
-        let iso = ISO8601DateFormatter()
+        let iso = sharedISO8601Formatter
         var items: [CheckInItem] = []
 
         for (i, v) in VisitDetector.shared.pendingVisits.enumerated() {
@@ -1791,10 +1798,9 @@ struct CheckInRowView: View {
     let item: CheckInItem
 
     private var timeStr: String {
-        let iso = ISO8601DateFormatter()
-        guard let date = iso.date(from: item.visit.arrivedAt) else { return item.visit.arrivedAt }
+        guard let date = sharedISO8601Formatter.date(from: item.visit.arrivedAt) else { return item.visit.arrivedAt }
         if item.isPending {
-            return RelativeDateTimeFormatter().localizedString(for: date, relativeTo: Date())
+            return sharedRelativeDateFormatter.localizedString(for: date, relativeTo: Date())
         }
         return date.formatted(date: .abbreviated, time: .shortened)
     }
@@ -2003,8 +2009,7 @@ struct CheckInDetailView: View {
                             .foregroundStyle(.secondary)
                     }
 
-                    let iso = ISO8601DateFormatter()
-                    if let date = iso.date(from: visit.arrivedAt) {
+                    if let date = sharedISO8601Formatter.date(from: visit.arrivedAt) {
                         Label(date.formatted(date: .abbreviated, time: .shortened), systemImage: "calendar")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)

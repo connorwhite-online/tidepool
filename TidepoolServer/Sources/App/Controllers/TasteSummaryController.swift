@@ -58,7 +58,7 @@ struct TasteSummaryController: RouteCollection {
             let response = TasteSummaryResponse(
                 summary: summary,
                 topInterests: topInterests,
-                generatedAt: ISO8601DateFormatter().string(from: Date())
+                generatedAt: iso8601Formatter.string(from: Date())
             )
             return response
         }
@@ -69,7 +69,7 @@ struct TasteSummaryController: RouteCollection {
         let response = TasteSummaryResponse(
             summary: summary,
             topInterests: topInterests,
-            generatedAt: ISO8601DateFormatter().string(from: Date())
+            generatedAt: iso8601Formatter.string(from: Date())
         )
 
         // Cache in Redis atomically — separate SET+EXPIRE could leak a

@@ -70,7 +70,7 @@ struct ProfileController: RouteCollection {
             vector: DeviceProfile.stringToVector(row.interest_vector),
             vectorVersion: row.vector_version,
             quality: row.quality,
-            updatedAt: ISO8601DateFormatter().string(from: row.updated_at)
+            updatedAt: iso8601Formatter.string(from: row.updated_at)
         )
         return try await response.encodeResponse(for: req)
     }
@@ -97,7 +97,7 @@ struct ProfileController: RouteCollection {
             vector: DeviceProfile.stringToVector(row.interest_vector),
             vectorVersion: row.vector_version,
             quality: row.quality,
-            updatedAt: ISO8601DateFormatter().string(from: row.updated_at)
+            updatedAt: iso8601Formatter.string(from: row.updated_at)
         )
         return try await response.encodeResponse(for: req)
     }
@@ -173,7 +173,7 @@ struct ProfileController: RouteCollection {
             vector: DeviceProfile.stringToVector(row.interest_vector),
             vectorVersion: row.vector_version,
             quality: row.quality,
-            updatedAt: ISO8601DateFormatter().string(from: row.updated_at)
+            updatedAt: iso8601Formatter.string(from: row.updated_at)
         )
         return try await response.encodeResponse(for: req)
     }

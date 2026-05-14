@@ -24,7 +24,7 @@ struct VisitController: RouteCollection {
         let payload = try req.auth.require(DevicePayload.self)
         let body = try req.content.decode(VisitBatchRequest.self)
 
-        let iso = ISO8601DateFormatter()
+        let iso = iso8601Formatter
         let latEpsilon = 0.0005
         let lonEpsilon = 0.0005
         let timeWindow: TimeInterval = 300
@@ -157,7 +157,7 @@ struct VisitController: RouteCollection {
             LIMIT 50
             """)).all(decoding: PatternRow.self)
 
-        let iso = ISO8601DateFormatter()
+        let iso = iso8601Formatter
         let patterns = rows.map { row in
             VisitPattern(
                 poiId: row.poi_id,
@@ -202,7 +202,7 @@ struct VisitController: RouteCollection {
             .limit(min(limit, 200))
             .all()
 
-        let iso = ISO8601DateFormatter()
+        let iso = iso8601Formatter
         return visits.map { v in
             VisitReport(
                 id: v.id?.uuidString,
@@ -237,7 +237,7 @@ struct VisitController: RouteCollection {
         }
 
         let body = try req.content.decode(VisitReport.self)
-        let iso = ISO8601DateFormatter()
+        let iso = iso8601Formatter
         guard let arrivedDate = iso.date(from: body.arrivedAt),
               let departedDate = iso.date(from: body.departedAt) else {
             throw Abort(.badRequest, reason: "Invalid arrived_at or departed_at")

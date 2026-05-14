@@ -88,7 +88,7 @@ struct FavoritesController: RouteCollection {
             latitude: fav.latitude,
             longitude: fav.longitude,
             rating: fav.rating,
-            createdAt: ISO8601DateFormatter().string(from: fav.createdAt)
+            createdAt: iso8601Formatter.string(from: fav.createdAt)
         )
     }
 }
