@@ -7,6 +7,18 @@ struct OnboardingView: View {
     @ObservedObject private var location = LocationManager.shared
     @State private var showingHomePicker = false
 
+    private var locationGranted: Bool {
+        location.authorizationStatus == .authorizedWhenInUse
+            || location.authorizationStatus == .authorizedAlways
+    }
+
+    private var locationDenied: Bool {
+        location.authorizationStatus == .denied
+            || location.authorizationStatus == .restricted
+    }
+
+    private var homeSet: Bool { location.homeLocation != nil }
+
     var body: some View {
         NavigationStack {
             VStack(spacing: 20) {
@@ -20,20 +32,33 @@ struct OnboardingView: View {
 
                 VStack(spacing: 12) {
                     Button {
-                        location.requestAuthorization()
+                        if !locationGranted { location.requestAuthorization() }
                     } label: {
-                        Label("Enable Location", systemImage: "location.fill")
-                            .frame(maxWidth: .infinity)
+                        HStack {
+                            Image(systemName: locationGranted ? "checkmark.circle.fill" : "location.fill")
+                            Text(locationGranted ? "Location enabled"
+                                 : locationDenied ? "Location denied — enable in Settings"
+                                 : "Enable Location")
+                            Spacer()
+                        }
+                        .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.borderedProminent)
+                    .tint(locationGranted ? .green : .accentColor)
+                    .disabled(locationGranted)
 
                     Button {
                         showingHomePicker = true
                     } label: {
-                        Label(location.homeLocation == nil ? "Set Home" : "Update Home", systemImage: "house.fill")
-                            .frame(maxWidth: .infinity)
+                        HStack {
+                            Image(systemName: homeSet ? "checkmark.circle.fill" : "house.fill")
+                            Text(homeSet ? "Home set — tap to update" : "Set Home")
+                            Spacer()
+                        }
+                        .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.bordered)
+                    .tint(homeSet ? .green : .accentColor)
                 }
                 .padding(.horizontal)
 
@@ -46,9 +71,12 @@ struct OnboardingView: View {
                     Text("Continue")
                         .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.borderedProminent)
                 .padding(.horizontal)
-                .disabled(location.authorizationStatus == .notDetermined && location.homeLocation == nil)
+                // Both steps should be addressed before continuing. If the user
+                // denied location at the system prompt, allow them through with
+                // home set so we have at least one anchor for the map view.
+                .disabled(!(locationGranted || locationDenied) || !homeSet)
 
                 Text("You can change Home later in Profile.")
                     .font(.footnote)
