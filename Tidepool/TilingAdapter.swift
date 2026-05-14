@@ -1,16 +1,19 @@
 import Foundation
 import CoreLocation
+import TidepoolShared
 
 protocol Tiler {
     func tileIdString(for coordinate: CLLocationCoordinate2D) -> String
 }
 
+/// Wraps TidepoolShared.GridTiler in the iOS-side Tiler protocol so the
+/// client and server agree on tile IDs byte-for-byte.
 struct GridTiler: Tiler {
     let metersPerTile: Int
     init(metersPerTile: Int = 150) { self.metersPerTile = metersPerTile }
     func tileIdString(for coordinate: CLLocationCoordinate2D) -> String {
-        let id = SimpleGridTiler.tileId(for: coordinate, metersPerTile: metersPerTile)
-        return id.description
+        let shared = Coordinate(latitude: coordinate.latitude, longitude: coordinate.longitude)
+        return TidepoolShared.GridTiler.tileID(for: shared, metersPerTile: metersPerTile).description
     }
 }
 
