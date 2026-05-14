@@ -59,6 +59,8 @@ func configure(_ app: Application) async throws {
     app.migrations.add(CreateVisits())
     app.migrations.add(AddMultiVectors())
     app.migrations.add(CreateTidepools())
+    app.migrations.add(AddVisitTileID())
+    app.migrations.add(AddVisitsRecentIndex())
 
     // MARK: - JWT
 
