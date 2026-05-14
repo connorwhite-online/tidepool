@@ -8,8 +8,16 @@ import TidepoolShared
 class YelpEnrichmentManager: ObservableObject {
     static let shared = YelpEnrichmentManager()
 
-    /// Cached enrichment keyed by stable place ID
+    /// Cached enrichment keyed by stable place ID. Bounded LRU so a long
+    /// browsing session doesn't accumulate every place the user opened.
     private var cache: [String: YelpEnrichment] = [:]
+    private var cacheOrder: [String] = []
+    private let cacheMax = 200
+
+    /// In-flight requests keyed by cacheKey. Two rapid taps on the same POI
+    /// (or two views appearing simultaneously) coalesce into one network
+    /// call instead of racing.
+    private var inFlight: [String: Task<YelpEnrichment?, Never>] = [:]
 
     struct YelpEnrichment {
         let yelpID: String
@@ -22,7 +30,8 @@ class YelpEnrichmentManager: ObservableObject {
         let isOpenNow: Bool?
     }
 
-    /// Fetch Yelp enrichment for a place. Returns cached result if available.
+    /// Fetch Yelp enrichment for a place. Returns cached result if available,
+    /// otherwise dedups concurrent calls for the same key.
     func enrich(name: String, coordinate: CLLocationCoordinate2D) async -> YelpEnrichment? {
         let cacheKey = "\(name.lowercased()):\(String(format: "%.4f", coordinate.latitude)):\(String(format: "%.4f", coordinate.longitude))"
 
@@ -30,6 +39,19 @@ class YelpEnrichmentManager: ObservableObject {
             return cached
         }
 
+        if let existing = inFlight[cacheKey] {
+            return await existing.value
+        }
+
+        let task = Task { [weak self] () -> YelpEnrichment? in
+            await self?.performEnrich(name: name, coordinate: coordinate, cacheKey: cacheKey) ?? nil
+        }
+        inFlight[cacheKey] = task
+        defer { inFlight[cacheKey] = nil }
+        return await task.value
+    }
+
+    private func performEnrich(name: String, coordinate: CLLocationCoordinate2D, cacheKey: String) async -> YelpEnrichment? {
         if !BackendClient.shared.isAuthenticated {
             print("[Enrichment] Not authenticated, waiting briefly...")
             // Resume the moment auth flips, instead of polling every 500ms.
@@ -57,11 +79,20 @@ class YelpEnrichmentManager: ObservableObject {
             let detail = try await BackendClient.shared.matchPlace(name: name, lat: coordinate.latitude, lng: coordinate.longitude)
             print("[Enrichment] Got: \(detail.name), rating: \(detail.rating ?? 0), photos: \(detail.photos?.count ?? 0)")
             let enrichment = mapToEnrichment(detail)
-            cache[cacheKey] = enrichment
+            store(enrichment, for: cacheKey)
             return enrichment
         } catch {
             print("[Enrichment] Failed '\(name)': \(error.localizedDescription)")
             return nil
+        }
+    }
+
+    private func store(_ enrichment: YelpEnrichment, for cacheKey: String) {
+        cache[cacheKey] = enrichment
+        cacheOrder.append(cacheKey)
+        if cacheOrder.count > cacheMax, let evict = cacheOrder.first {
+            cacheOrder.removeFirst()
+            cache.removeValue(forKey: evict)
         }
     }
 
