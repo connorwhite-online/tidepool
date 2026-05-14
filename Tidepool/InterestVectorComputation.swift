@@ -310,19 +310,21 @@ class InterestVectorManager: ObservableObject {
     }
     
     private func getDominantCategories() -> [PlaceCategory] {
-        // Map vector weights back to place categories
+        // Map vector weights back to place categories. Use vocabularyIndex
+        // for O(1) tag lookups — Array.firstIndex(of:) in this nested loop
+        // was scanning the 130-tag vocabulary ~120 times per call.
         var categoryWeights: [PlaceCategory: Float] = [:]
-        
+
         for category in PlaceCategory.allCases {
             var weight: Float = 0.0
             for tag in category.interestTags {
-                if let index = vocabulary.firstIndex(of: tag) {
+                if let index = vocabularyIndex[tag] {
                     weight += currentVector[index]
                 }
             }
             categoryWeights[category] = weight
         }
-        
+
         return categoryWeights
             .sorted { $0.value > $1.value }
             .prefix(3)
