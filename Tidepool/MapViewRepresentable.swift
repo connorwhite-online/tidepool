@@ -281,19 +281,13 @@ struct MapViewRepresentable: UIViewRepresentable {
         mapView.isPitchEnabled = true
         mapView.isZoomEnabled = true
         mapView.showsCompass = false
-        if #available(iOS 16.0, *) {
-            let cfg = MKStandardMapConfiguration(elevationStyle: .flat, emphasisStyle: .muted)
-            mapView.preferredConfiguration = cfg
-        }
-        // Show native Apple POIs with their original icons
-        if #available(iOS 13.0, *) {
-            let categories: [MKPointOfInterestCategory] = [.cafe, .restaurant, .nightlife, .park, .store, .museum, .hospital, .school, .library, .gasStation, .pharmacy, .bank, .hotel, .theater, .fitnessCenter]
-            mapView.pointOfInterestFilter = MKPointOfInterestFilter(including: categories)
-        }
-        // Enable tap-to-select on native POI features (iOS 16+)
-        if #available(iOS 16.0, *) {
-            mapView.selectableMapFeatures = [.pointsOfInterest]
-        }
+
+        mapView.preferredConfiguration = MKStandardMapConfiguration(elevationStyle: .flat, emphasisStyle: .muted)
+
+        // Show native Apple POIs with their original icons.
+        let categories: [MKPointOfInterestCategory] = [.cafe, .restaurant, .nightlife, .park, .store, .museum, .hospital, .school, .library, .gasStation, .pharmacy, .bank, .hotel, .theater, .fitnessCenter]
+        mapView.pointOfInterestFilter = MKPointOfInterestFilter(including: categories)
+        mapView.selectableMapFeatures = [.pointsOfInterest]
 
         return mapView
     }
@@ -526,8 +520,7 @@ struct MapViewRepresentable: UIViewRepresentable {
             }
         }
         
-        // iOS 16+ delegate for selectable map features (native POIs)
-        @available(iOS 16.0, *)
+        // Delegate for selectable map features (native POIs).
         func mapView(_ mapView: MKMapView, didSelect annotation: MKAnnotation) {
             if annotation is MKUserLocation { return }
 
@@ -569,27 +562,5 @@ struct MapViewRepresentable: UIViewRepresentable {
             // POI stays selected while detail modal is open — deselection handled in updateUIView
         }
 
-        // Fallback for pre-iOS 16 (annotation view-based selection)
-        func mapView(_ mapView: MKMapView, didSelect view: MKAnnotationView) {
-            guard let annotation = view.annotation else { return }
-            if annotation is MKUserLocation { return }
-
-            // On iOS 16+, the annotation-based didSelect handles features
-            if #available(iOS 16.0, *) { return }
-
-            // Smoothly center the map on the tapped POI
-            UIView.animate(withDuration: 0.4, delay: 0, options: .curveEaseInOut) {
-                mapView.setCenter(annotation.coordinate, animated: false)
-            }
-
-            let tapPoint = mapView.convert(view.center, to: nil)
-            let poiAnnotation = POIAnnotation(
-                coordinate: annotation.coordinate,
-                title: annotation.title ?? "Unknown Place",
-                subtitle: nil
-            )
-            onAnnotationTap?(poiAnnotation, tapPoint)
-            // POI stays selected while detail modal is open — deselection handled in updateUIView
-        }
     }
 } 
