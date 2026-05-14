@@ -5,6 +5,10 @@ import SQLKit
 import TidepoolShared
 
 struct RecommendationController: RouteCollection {
+    /// 5 minutes — fresh enough that newly-onboarded similar users surface
+    /// quickly but long enough to absorb repeated For You panel opens.
+    private let responseCacheTTL = 300
+
     func boot(routes: RoutesBuilder) throws {
         routes.post(use: getRecommendations)
     }
@@ -21,36 +25,14 @@ struct RecommendationController: RouteCollection {
         let deviceIDStr = payload.deviceID.uuidString
         let limit = body.limit ?? 20
 
-        // Get similar users from Redis cache or compute
-        let cacheKey = RedisKey("aligned:\(deviceIDStr)")
-        let cached = try? await req.redis.send(command: "SMEMBERS", with: [
-            .init(from: cacheKey.rawValue)
-        ]).get()
-
-        var similarIDs: [String] = []
-        if let cached, let members = cached.array, !members.isEmpty {
-            similarIDs = members.compactMap { $0.string }
-        } else {
-            // Fallback: compute similarity inline
-            let rows = try await sql.raw(SQLQueryString("""
-                SELECT p2.device_id::text as device_id
-                FROM device_profiles p1
-                CROSS JOIN device_profiles p2
-                WHERE p1.device_id = '\(unsafeRaw: deviceIDStr)'::uuid
-                  AND p2.device_id != '\(unsafeRaw: deviceIDStr)'::uuid
-                  AND p2.quality != 'poor'
-                ORDER BY
-                    CASE
-                        WHEN p1.places_vector IS NOT NULL AND p2.places_vector IS NOT NULL
-                        THEN 0.5 * (p1.places_vector <=> p2.places_vector)
-                             + 0.3 * COALESCE(p1.music_vector <=> p2.music_vector, 1)
-                             + 0.2 * COALESCE(p1.vibe_vector <=> p2.vibe_vector, 1)
-                        ELSE p1.interest_vector <=> p2.interest_vector
-                    END
-                LIMIT 50
-                """)).all(decoding: DeviceIDRow.self)
-            similarIDs = rows.map { $0.device_id }
+        // Response cache — the heavy aggregate query is the bulk of the cost
+        // and the result varies only by (device, day_of_week, hour-bucket).
+        let responseCacheKey = "rec:\(deviceIDStr):\(body.currentDayOfWeek):\(body.currentHour)"
+        if let cached = try? await req.redis.get(RedisKey(responseCacheKey), asJSON: RecommendationResponse.self) {
+            return cached
         }
+
+        let similarIDs = try await loadSimilarUserIDs(deviceID: deviceIDStr, sql: sql, req: req)
 
         guard !similarIDs.isEmpty else {
             return RecommendationResponse(recommendations: [])
@@ -100,10 +82,32 @@ struct RecommendationController: RouteCollection {
             )
         }
 
-        return RecommendationResponse(recommendations: recommendations)
+        let response = RecommendationResponse(recommendations: recommendations)
+
+        // Atomic SET ... EX so we never leak a TTL-less cache entry on crash.
+        if let data = try? JSONEncoder().encode(response),
+           let json = String(data: data, encoding: .utf8) {
+            _ = try? await req.redis.send(command: "SET", with: [
+                .init(from: responseCacheKey),
+                .init(from: json),
+                .init(from: "EX"),
+                .init(from: String(responseCacheTTL))
+            ]).get()
+        }
+
+        return response
     }
 
-    private struct DeviceIDRow: Decodable { let device_id: String }
+    private func loadSimilarUserIDs(deviceID: String, sql: SQLDatabase, req: Request) async throws -> [String] {
+        let entries = try await SimilarUsersCache.load(
+            deviceID: deviceID,
+            sql: sql,
+            redis: req.redis,
+            logger: req.logger
+        )
+        return entries.map { $0.id }
+    }
+
     private struct RecommendationRow: Decodable {
         let poi_id: String?
         let yelp_id: String?

@@ -97,73 +97,14 @@ struct AlignedHeatController: RouteCollection {
     // MARK: - Similar Users
 
     /// Read precomputed tidepool matches, fall back to inline computation for new users.
-    /// Cache the similar-users list in Redis. Aligned-heat fires on every map
-    /// pan and the underlying tidepools table only changes when the nightly
-    /// batch runs or the user's vectors update, so the DB query is wasted
-    /// work on the second-through-N-th pan.
-    private let similarCacheTTL = 900 // 15 minutes
-
     private func getSimilarUsers(deviceID: String, sql: SQLDatabase, req: Request) async throws -> [(id: String, similarity: Float)] {
-        let cacheKey = "aligned_sim:\(deviceID)"
-
-        if let cached = try? await req.redis.get(RedisKey(cacheKey), asJSON: [CachedSim].self) {
-            return cached.map { (id: $0.id, similarity: $0.similarity) }
-        }
-
-        // Read from precomputed tidepools table
-        let rows = try await sql.raw(SQLQueryString("""
-            SELECT match_id::text as device_id, similarity_score
-            FROM tidepools
-            WHERE device_id = '\(unsafeRaw: deviceID)'::uuid
-            ORDER BY similarity_score DESC
-            """)).all(decoding: SimilarRow.self)
-
-        let result: [(id: String, similarity: Float)]
-        if !rows.isEmpty {
-            result = rows.map { (id: $0.device_id, similarity: $0.similarity_score) }
-        } else {
-            // Fallback for users with no precomputed tidepool yet
-            req.logger.info("[AlignedHeat] No precomputed tidepool for \(deviceID), using inline")
-            let fallback = try await sql.raw(SQLQueryString("""
-                SELECT p2.device_id::text as device_id,
-                       1.0 - (p1.interest_vector <=> p2.interest_vector) as similarity_score
-                FROM device_profiles p1
-                CROSS JOIN device_profiles p2
-                WHERE p1.device_id = '\(unsafeRaw: deviceID)'::uuid
-                  AND p2.device_id != '\(unsafeRaw: deviceID)'::uuid
-                  AND p2.quality != 'poor'
-                ORDER BY p1.interest_vector <=> p2.interest_vector
-                LIMIT 100
-                """)).all(decoding: SimilarRow.self)
-            result = fallback.map { (id: $0.device_id, similarity: $0.similarity_score) }
-        }
-
-        // Cache atomically (SET ... EX). A separate SET + EXPIRE would leak
-        // a TTL-less key on a crash between the two.
-        let cacheable = result.map { CachedSim(id: $0.id, similarity: $0.similarity) }
-        if let data = try? JSONEncoder().encode(cacheable),
-           let json = String(data: data, encoding: .utf8) {
-            _ = try? await req.redis.send(command: "SET", with: [
-                .init(from: cacheKey),
-                .init(from: json),
-                .init(from: "EX"),
-                .init(from: String(similarCacheTTL))
-            ]).get()
-        }
-
-        return result
-    }
-
-    private struct SimilarRow: Decodable {
-        let device_id: String
-        let similarity_score: Float
-    }
-
-    /// Storage shape for the Redis-cached similar-users list. Kept separate
-    /// from SimilarRow because Decodable for a tuple in Swift is annoying.
-    private struct CachedSim: Codable {
-        let id: String
-        let similarity: Float
+        let entries = try await SimilarUsersCache.load(
+            deviceID: deviceID,
+            sql: sql,
+            redis: req.redis,
+            logger: req.logger
+        )
+        return entries.map { (id: $0.id, similarity: $0.similarity) }
     }
 
     private struct WeightedVisitRow: Decodable {
