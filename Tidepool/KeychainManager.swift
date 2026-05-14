@@ -24,7 +24,6 @@ struct BackendCredentials: Codable {
 
 enum KeychainError: LocalizedError {
     case itemNotFound
-    case duplicateItem
     case unexpectedStatus(OSStatus)
     case encodingFailed
     case decodingFailed
@@ -33,8 +32,6 @@ enum KeychainError: LocalizedError {
         switch self {
         case .itemNotFound:
             return "Item not found in Keychain"
-        case .duplicateItem:
-            return "Item already exists in Keychain"
         case .unexpectedStatus(let status):
             return "Keychain error: \(status)"
         case .encodingFailed:
@@ -52,7 +49,7 @@ class KeychainManager {
 
     private let serviceName = "com.tidepool.app"
 
-    init() {}
+    private init() {}
 
     // MARK: - Save
 
@@ -65,7 +62,11 @@ class KeychainManager {
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: serviceName,
             kSecAttrAccount as String: key.rawValue,
-            kSecValueData as String: data
+            kSecValueData as String: data,
+            // Background visit uploads need keychain access after first unlock.
+            // ThisDeviceOnly so a restored backup doesn't carry our JWT (which
+            // identifies the original device) to a new device.
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         ]
 
         // Try to delete existing item first
@@ -123,46 +124,4 @@ class KeychainManager {
         }
     }
 
-    // MARK: - Exists
-
-    func exists(for key: KeychainKey) -> Bool {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: serviceName,
-            kSecAttrAccount as String: key.rawValue,
-            kSecReturnData as String: false
-        ]
-
-        let status = SecItemCopyMatching(query as CFDictionary, nil)
-        return status == errSecSuccess
-    }
-
-    // MARK: - Update
-
-    func update<T: Codable>(_ item: T, for key: KeychainKey) throws {
-        guard let data = try? JSONEncoder().encode(item) else {
-            throw KeychainError.encodingFailed
-        }
-
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: serviceName,
-            kSecAttrAccount as String: key.rawValue
-        ]
-
-        let attributes: [String: Any] = [
-            kSecValueData as String: data
-        ]
-
-        let status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
-
-        guard status == errSecSuccess else {
-            if status == errSecItemNotFound {
-                // Item doesn't exist, create it
-                try save(item, for: key)
-                return
-            }
-            throw KeychainError.unexpectedStatus(status)
-        }
-    }
 }
