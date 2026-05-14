@@ -51,6 +51,11 @@ struct ProfileController: RouteCollection {
                 updated_at = now()
             """)).run()
 
+        // The interest vector just changed — drop the cached similar-users
+        // list so the next aligned-heat/recommendation request rebuilds
+        // against the new profile instead of serving from the stale snapshot.
+        await SimilarUsersCache.invalidate(deviceID: deviceIDStr, redis: req.redis)
+
         // Fetch via raw SQL to get the vector as text
         let rows = try await sql.raw(SQLQueryString("""
             SELECT interest_vector::text as interest_vector, vector_version, quality, active_sources, updated_at
@@ -151,6 +156,9 @@ struct ProfileController: RouteCollection {
                 tidepool_computed_at = NULL,
                 updated_at = now()
             """)).run()
+
+        // Invalidate cached similar-users — the user's vectors just changed.
+        await SimilarUsersCache.invalidate(deviceID: deviceIDStr, redis: req.redis)
 
         let rows = try await sql.raw(SQLQueryString("""
             SELECT interest_vector::text as interest_vector, vector_version, quality, active_sources, updated_at
