@@ -10,7 +10,7 @@ struct PresenceCircleOverlay: Identifiable {
 }
 
 struct MapHomeView: View {
-    @StateObject private var location = LocationManager()
+    @ObservedObject private var location = LocationManager.shared
     @State private var presenceOverlays: [PresenceCircleOverlay] = []
     @State private var heatOverlays: [HeatCircleOverlay] = []
     @State private var heatBlobGroups: [HeatBlobGroup] = []

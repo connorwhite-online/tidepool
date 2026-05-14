@@ -58,7 +58,7 @@ final class PlaceSearchCompleter: NSObject, ObservableObject, MKLocalSearchCompl
 struct PlaceSearchView: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject var favoritesManager: InAppFavoritesManager
-    @StateObject private var locationManager = LocationManager()
+    @ObservedObject private var locationManager = LocationManager.shared
     @StateObject private var searchCompleter = PlaceSearchCompleter()
 
     @State private var searchText = ""

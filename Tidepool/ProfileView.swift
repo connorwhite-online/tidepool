@@ -10,7 +10,7 @@ struct ProfileView: View {
     @AppStorage("background_enabled") private var backgroundEnabled: Bool = false
     @AppStorage("reduced_accuracy") private var reducedAccuracy: Bool = true
 
-    @StateObject private var location = LocationManager()
+    @ObservedObject private var location = LocationManager.shared
     @StateObject private var appleMapsManager = AppleMapsIntegrationManager()
     @StateObject private var photosManager = PhotosIntegrationManager()
     @EnvironmentObject var favoritesManager: InAppFavoritesManager

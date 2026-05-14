@@ -4,7 +4,7 @@ import MapKit
 struct OnboardingView: View {
     @Environment(\.dismiss) private var dismiss
     @AppStorage("has_onboarded") private var hasOnboarded: Bool = false
-    @StateObject private var location = LocationManager()
+    @ObservedObject private var location = LocationManager.shared
     @State private var showingHomePicker = false
 
     var body: some View {

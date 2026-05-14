@@ -237,7 +237,7 @@ struct MapSearchSheet: View {
 
     @StateObject private var searchCompleter = PlaceSearchCompleter()
     @StateObject private var forYouLoader = ForYouRecommendationLoader()
-    @StateObject private var locationManager = LocationManager()
+    @ObservedObject private var locationManager = LocationManager.shared
     @State private var searchText = ""
     @State private var searchResults: [MKMapItem] = []
     @State private var isSearching = false
