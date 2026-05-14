@@ -554,7 +554,6 @@ struct MapSearchSheet: View {
 @MainActor
 final class ForYouRecommendationLoader: ObservableObject {
     @Published var recommendations: [MKMapItem] = []
-    @Published var serverResults: [PlaceSearchResult] = []
     @Published var isLoading = false
 
     /// Load recommendations — tries server-backed blended search first, falls back to local MapKit.

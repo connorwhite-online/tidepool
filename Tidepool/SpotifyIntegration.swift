@@ -371,7 +371,7 @@ class SpotifyAPIClient {
 
     // MARK: - Generic Request with Auto Token Refresh
 
-    private func makeRequest<T: Decodable>(endpoint: String, queryItems: [URLQueryItem] = []) async throws -> T {
+    private func makeRequest<T: Decodable>(endpoint: String, queryItems: [URLQueryItem] = [], retriedAuth: Bool = false) async throws -> T {
         // Get credentials from Keychain
         var credentials: SpotifyCredentials
         do {
@@ -412,10 +412,13 @@ class SpotifyAPIClient {
                 throw SpotifyAPIError.decodingError(error.localizedDescription)
             }
         case 401:
-            // Token expired mid-request, refresh and retry once
+            // Token expired mid-request, refresh and retry once. The
+            // retriedAuth flag prevents an infinite loop if the refreshed
+            // token also comes back rejected (revoked, scope changed, etc).
+            guard !retriedAuth else { throw SpotifyAPIError.noCredentials }
             credentials = try await authManager.refreshAccessToken(refreshToken: credentials.refreshToken)
             try keychainManager.save(credentials, for: .spotifyCredentials)
-            return try await makeRequest(endpoint: endpoint, queryItems: queryItems)
+            return try await makeRequest(endpoint: endpoint, queryItems: queryItems, retriedAuth: true)
         case 429:
             throw SpotifyAPIError.rateLimited
         default:
