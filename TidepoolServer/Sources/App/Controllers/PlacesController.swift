@@ -4,23 +4,7 @@ import TidepoolShared
 
 struct PlacesController: RouteCollection {
     func boot(routes: RoutesBuilder) throws {
-        routes.get(":placeID", use: getDetail)
         routes.get("match", use: matchPlace)
-    }
-
-    // MARK: - Place Detail
-
-    /// GET /v1/places/:placeID — Enriched place detail from Google Places
-    func getDetail(req: Request) async throws -> Response {
-        guard let placeID = req.parameters.get("placeID") else {
-            throw Abort(.badRequest, reason: "Missing placeID parameter")
-        }
-
-        let google = try getService(req: req)
-        let detail = try await google.getPlaceDetails(placeID: placeID, on: req)
-        let mapped = google.toPlaceDetail(detail)
-
-        return try await mapped.encodeResponse(for: req)
     }
 
     // MARK: - Place Match
