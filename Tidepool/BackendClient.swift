@@ -139,10 +139,6 @@ class BackendClient: ObservableObject {
         try await request(method: "POST", path: "/v1/visits/batch", body: body)
     }
 
-    func getVisitPatterns() async throws -> VisitPatternResponse {
-        try await request(method: "GET", path: "/v1/visits/patterns")
-    }
-
     func getRecentVisits(limit: Int = 50) async throws -> [VisitReport] {
         try await request(method: "GET", path: "/v1/visits/recent?limit=\(limit)")
     }
@@ -181,20 +177,10 @@ class BackendClient: ObservableObject {
         try await request(method: "POST", path: "/v1/presence/report", body: report)
     }
 
-    // MARK: - Heat Tiles
-
-    func fetchHeatTiles(_ body: HeatTileRequest) async throws -> HeatTileResponse {
-        try await request(method: "POST", path: "/v1/tiles/heat", body: body)
-    }
-
     // MARK: - Places
 
     func searchPlaces(_ body: PlaceSearchRequest) async throws -> PlaceSearchResponse {
         try await request(method: "POST", path: "/v1/search/places", body: body)
-    }
-
-    func getPlaceDetail(yelpID: String) async throws -> PlaceDetail {
-        try await request(method: "GET", path: "/v1/places/\(yelpID)")
     }
 
     func matchPlace(name: String, lat: Double, lng: Double) async throws -> PlaceDetail {
