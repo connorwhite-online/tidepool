@@ -129,3 +129,4 @@ struct AlignedHeatController: RouteCollection {
 }
 
 extension AlignedHeatRequest: @retroactive Content {}
+extension HeatTileResponse: @retroactive Content {}

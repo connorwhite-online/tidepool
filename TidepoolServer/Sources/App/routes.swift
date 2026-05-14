@@ -19,7 +19,6 @@ func routes(_ app: Application) throws {
     try authenticated.grouped("places").register(collection: PlacesController())
     try authenticated.grouped("search").register(collection: SearchController())
     try authenticated.grouped("presence").register(collection: PresenceController())
-    try authenticated.grouped("tiles").register(collection: HeatTileController())
     try authenticated.grouped("favorites").register(collection: FavoritesController())
     try authenticated.grouped("profile").register(collection: SimilarController())
     try authenticated.grouped("profile").register(collection: TasteSummaryController())

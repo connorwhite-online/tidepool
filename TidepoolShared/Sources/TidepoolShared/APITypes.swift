@@ -109,20 +109,6 @@ public struct PresenceResponse: Codable, Sendable {
 
 // MARK: - Heat Tiles
 
-public struct HeatTileRequest: Codable, Sendable {
-    public let viewport: Viewport
-    public let viewerVector: [Float]?
-
-    public init(viewport: Viewport, viewerVector: [Float]?) {
-        self.viewport = viewport
-        self.viewerVector = viewerVector
-    }
-
-    enum CodingKeys: String, CodingKey {
-        case viewport
-        case viewerVector = "viewer_vector"
-    }
-}
 
 public struct Viewport: Codable, Sendable {
     public let ne: Coordinate
