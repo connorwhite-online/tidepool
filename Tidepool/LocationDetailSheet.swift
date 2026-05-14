@@ -191,19 +191,17 @@ private struct LocationDetailContent: View {
             HStack(spacing: 10) {
                 if let photos = enrichment?.photos {
                     ForEach(photos.prefix(skeletonCount), id: \.url) { photo in
-                        AsyncImage(url: photo.url) { phase in
-                            switch phase {
-                            case .success(let image):
-                                image
-                                    .resizable()
-                                    .aspectRatio(contentMode: .fill)
-                                    .frame(width: photoTileSize, height: photoTileSize)
-                                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                            case .failure:
-                                photoSkeleton
-                            default:
-                                photoSkeleton
-                            }
+                        RemoteImage(
+                            url: photo.url,
+                            targetSize: CGSize(width: photoTileSize, height: photoTileSize)
+                        ) { image in
+                            image
+                                .resizable()
+                                .aspectRatio(contentMode: .fill)
+                                .frame(width: photoTileSize, height: photoTileSize)
+                                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        } placeholder: {
+                            photoSkeleton
                         }
                     }
                 } else {

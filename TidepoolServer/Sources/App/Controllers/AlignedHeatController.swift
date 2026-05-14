@@ -35,12 +35,26 @@ struct AlignedHeatController: RouteCollection {
         let simLookup = Dictionary(uniqueKeysWithValues: similarUsers.map { ($0.id, $0.similarity) })
         let deviceList = similarUsers.map { "'\($0.id)'::uuid" }.joined(separator: ",")
 
-        // Query visits with individual device_id for similarity weighting
+        // Pad the viewport a little so a visit recorded a few meters outside
+        // the snapped tile grid still contributes. ~10m at the equator.
+        let latPad = 0.0001
+        let lonPad = 0.0001
+        let minLat = min(body.viewport.sw.latitude, body.viewport.ne.latitude) - latPad
+        let maxLat = max(body.viewport.sw.latitude, body.viewport.ne.latitude) + latPad
+        let minLon = min(body.viewport.sw.longitude, body.viewport.ne.longitude) - lonPad
+        let maxLon = max(body.viewport.sw.longitude, body.viewport.ne.longitude) + lonPad
+
+        // Query visits with individual device_id for similarity weighting.
+        // Bound by viewport lat/lng so we don't ship the entire user's history
+        // across the network just to drop most of it in the viewportTiles
+        // membership check below.
         let visitRows = try await sql.raw(SQLQueryString("""
             SELECT device_id::text as device_id, latitude, longitude, hour_of_day,
                    COUNT(*) as visit_count
             FROM visits
             WHERE device_id IN (\(unsafeRaw: deviceList))
+              AND latitude BETWEEN \(unsafeRaw: String(minLat)) AND \(unsafeRaw: String(maxLat))
+              AND longitude BETWEEN \(unsafeRaw: String(minLon)) AND \(unsafeRaw: String(maxLon))
               AND (day_of_week = \(unsafeRaw: String(body.currentDayOfWeek))
                    OR day_of_week = \(unsafeRaw: String((body.currentDayOfWeek + 6) % 7))
                    OR day_of_week = \(unsafeRaw: String((body.currentDayOfWeek + 1) % 7)))

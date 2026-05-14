@@ -1,9 +1,6 @@
 import Vapor
 import Redis
 import TidepoolShared
-#if canImport(FoundationNetworking)
-import FoundationNetworking
-#endif
 
 /// Server-side Google Places API client with Redis caching.
 struct GooglePlacesService {
@@ -32,14 +29,15 @@ struct GooglePlacesService {
 
         let radius = params.radiusMeters ?? 1000
         let encoded = params.query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? params.query
-        let url = URL(string: "\(baseURL)/nearbysearch/json?location=\(params.latitude),\(params.longitude)&radius=\(radius)&keyword=\(encoded)&key=\(apiKey)")!
+        guard let url = URL(string: "\(baseURL)/nearbysearch/json?location=\(params.latitude),\(params.longitude)&radius=\(radius)&keyword=\(encoded)&key=\(apiKey)") else {
+            throw Abort(.internalServerError, reason: "Invalid Google Places URL")
+        }
 
         let data = try await makeRequest(url: url, on: req)
         let response = try JSONDecoder().decode(GoogleNearbyResponse.self, from: data)
         let places = Array(response.results.prefix(params.limit))
 
-        try? await req.redis.set(RedisKey(cacheKey), toJSON: places)
-        _ = try? await req.redis.expire(RedisKey(cacheKey), after: .seconds(3600))
+        await cacheJSON(places, key: cacheKey, ttlSeconds: 3600, on: req)
 
         return places
     }
@@ -52,14 +50,15 @@ struct GooglePlacesService {
             return cached
         }
 
-        let url = URL(string: "\(baseURL)/details/json?place_id=\(placeID)&fields=name,rating,price_level,formatted_phone_number,website,opening_hours,photos,formatted_address,geometry,types&key=\(apiKey)")!
+        guard let url = URL(string: "\(baseURL)/details/json?place_id=\(placeID)&fields=name,rating,price_level,formatted_phone_number,website,opening_hours,photos,formatted_address,geometry,types&key=\(apiKey)") else {
+            throw Abort(.internalServerError, reason: "Invalid Google Places URL")
+        }
 
         let data = try await makeRequest(url: url, on: req)
         let response = try JSONDecoder().decode(GoogleDetailResponse.self, from: data)
         let detail = response.result
 
-        try? await req.redis.set(RedisKey(cacheKey), toJSON: detail)
-        _ = try? await req.redis.expire(RedisKey(cacheKey), after: .seconds(86400))
+        await cacheJSON(detail, key: cacheKey, ttlSeconds: 86400, on: req)
 
         return detail
     }
@@ -74,7 +73,9 @@ struct GooglePlacesService {
 
         // Find Place from Text with location bias
         let encoded = name.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? name
-        let url = URL(string: "\(baseURL)/findplacefromtext/json?input=\(encoded)&inputtype=textquery&locationbias=circle:1000@\(latitude),\(longitude)&fields=place_id,name,geometry&key=\(apiKey)")!
+        guard let url = URL(string: "\(baseURL)/findplacefromtext/json?input=\(encoded)&inputtype=textquery&locationbias=circle:1000@\(latitude),\(longitude)&fields=place_id,name,geometry&key=\(apiKey)") else {
+            throw Abort(.internalServerError, reason: "Invalid Google Places URL")
+        }
 
         let data = try await makeRequest(url: url, on: req)
         let response = try JSONDecoder().decode(GoogleFindPlaceResponse.self, from: data)
@@ -84,10 +85,22 @@ struct GooglePlacesService {
         // Fetch full details
         let detail = try await getPlaceDetails(placeID: candidate.placeId, on: req)
 
-        try? await req.redis.set(RedisKey(cacheKey), toJSON: detail)
-        _ = try? await req.redis.expire(RedisKey(cacheKey), after: .seconds(86400))
+        await cacheJSON(detail, key: cacheKey, ttlSeconds: 86400, on: req)
 
         return detail
+    }
+
+    /// Atomically SET ... EX a JSON-encoded value. Separate SET + EXPIRE would
+    /// leak a TTL-less key if the server crashes between the two commands.
+    private func cacheJSON<T: Encodable>(_ value: T, key: String, ttlSeconds: Int, on req: Request) async {
+        guard let data = try? JSONEncoder().encode(value),
+              let json = String(data: data, encoding: .utf8) else { return }
+        _ = try? await req.redis.send(command: "SET", with: [
+            .init(from: key),
+            .init(from: json),
+            .init(from: "EX"),
+            .init(from: String(ttlSeconds))
+        ]).get()
     }
 
     // MARK: - Photo URL Builder
@@ -98,16 +111,23 @@ struct GooglePlacesService {
 
     // MARK: - HTTP
 
+    /// Uses Vapor's async HTTPClient (AsyncHTTPClient under the hood) instead
+    /// of URLSession.shared. URLSession.shared on Linux is FoundationNetworking
+    /// which blocks an event-loop thread for each call; AsyncHTTPClient shares
+    /// the Vapor pool and never blocks the event loop.
     private func makeRequest(url: URL, on req: Request) async throws -> Data {
-        let (data, response) = try await URLSession.shared.data(for: URLRequest(url: url))
+        let response = try await req.client.get(URI(string: url.absoluteString))
 
-        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
-            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-            req.logger.error("[Google Places] API error \(status): \(String(data: data, encoding: .utf8) ?? "")")
-            throw Abort(.badGateway, reason: "Google Places API returned \(status)")
+        guard response.status == .ok else {
+            let bodyText = response.body.map { String(buffer: $0) } ?? ""
+            req.logger.error("[Google Places] API error \(response.status.code): \(bodyText)")
+            throw Abort(.badGateway, reason: "Google Places API returned \(response.status.code)")
         }
 
-        return data
+        guard let body = response.body else {
+            throw Abort(.badGateway, reason: "Google Places API returned empty body")
+        }
+        return Data(buffer: body)
     }
 
     // MARK: - Convert to PlaceDetail (shared type)

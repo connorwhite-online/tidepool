@@ -41,12 +41,20 @@ struct SearchController: RouteCollection {
             viewerVector = try await loadVector(deviceID: payload.deviceID, on: req)
         }
 
-        // Map and score results
+        // Map and score results. Precompute the viewer-vector norm once
+        // so the inner alignment loop doesn't redo it for every result.
+        let viewerNorm: Float? = viewerVector.map { vec in
+            sqrt(vec.reduce(Float(0)) { $0 + $1 * $1 })
+        }
+
         let results: [PlaceSearchResult] = googleResults.enumerated().map { index, place in
             let categoryNames = (place.types ?? []).map { $0.lowercased() }
-            let alignment = viewerVector.map { vec in
-                computeInterestAlignment(categories: categoryNames, viewerVector: vec)
-            } ?? Float(0)
+            let alignment: Float
+            if let vec = viewerVector, let norm = viewerNorm {
+                alignment = Self.computeInterestAlignment(categories: categoryNames, viewerVector: vec, viewerNorm: norm)
+            } else {
+                alignment = 0
+            }
 
             let ratingScore = (place.rating ?? 0) / 5.0
             let positionDecay = 1.0 - Float(index) / Float(max(googleResults.count, 1))
@@ -79,36 +87,38 @@ struct SearchController: RouteCollection {
 
     // MARK: - Interest Alignment
 
-    /// Compute alignment between a place's categories and the viewer's interest vector.
-    private func computeInterestAlignment(categories: [String], viewerVector: [Float]) -> Float {
-        guard !viewerVector.isEmpty else { return 0 }
+    /// Map Google Place category aliases to interest vocabulary tags. Built
+    /// once at type initialization instead of per-call.
+    private static let categoryTagMap: [String: [String]] = [
+        "restaurants": ["dining", "restaurant", "social"],
+        "food": ["dining", "restaurant"],
+        "bars": ["bar", "nightlife", "social"],
+        "coffee": ["coffee", "cafe", "work"],
+        "cafes": ["cafe", "coffee", "social"],
+        "nightlife": ["nightlife", "bar", "social", "entertainment"],
+        "arts": ["arts", "culture", "museum"],
+        "shopping": ["shopping", "mall"],
+        "fitness": ["fitness", "gym", "sports"],
+        "beautysvc": ["upscale", "trendy"],
+        "parks": ["park", "outdoor", "nature"],
+        "museums": ["museum", "culture", "arts"],
+        "bakeries": ["bakery", "cafe"],
+        "breweries": ["brewery", "craft_beer", "bar"],
+        "wine_bars": ["wine_bar", "bar", "romantic"],
+        "cocktailbars": ["cocktails", "bar", "nightlife"],
+        "hiking": ["hiking", "outdoor", "nature", "fitness"],
+        "bookstores": ["bookstore", "quiet", "culture"],
+    ]
 
-        // Map Yelp category aliases to interest vocabulary tags
-        let categoryTagMap: [String: [String]] = [
-            "restaurants": ["dining", "restaurant", "social"],
-            "food": ["dining", "restaurant"],
-            "bars": ["bar", "nightlife", "social"],
-            "coffee": ["coffee", "cafe", "work"],
-            "cafes": ["cafe", "coffee", "social"],
-            "nightlife": ["nightlife", "bar", "social", "entertainment"],
-            "arts": ["arts", "culture", "museum"],
-            "shopping": ["shopping", "mall"],
-            "fitness": ["fitness", "gym", "sports"],
-            "beautysvc": ["upscale", "trendy"],
-            "parks": ["park", "outdoor", "nature"],
-            "museums": ["museum", "culture", "arts"],
-            "bakeries": ["bakery", "cafe"],
-            "breweries": ["brewery", "craft_beer", "bar"],
-            "wine_bars": ["wine_bar", "bar", "romantic"],
-            "cocktailbars": ["cocktails", "bar", "nightlife"],
-            "hiking": ["hiking", "outdoor", "nature", "fitness"],
-            "bookstores": ["bookstore", "quiet", "culture"],
-        ]
+    /// Cosine alignment between a place's categories and the viewer's interest
+    /// vector. The viewer-vector norm is passed in because it's constant
+    /// across all results in a search response.
+    private static func computeInterestAlignment(categories: [String], viewerVector: [Float], viewerNorm: Float) -> Float {
+        guard !viewerVector.isEmpty, viewerNorm > 0 else { return 0 }
 
-        // Build a simple place vector from categories
         var placeVector = [Float](repeating: 0, count: InterestVocabulary.dimensions)
         for categoryAlias in categories {
-            let tags = categoryTagMap[categoryAlias] ?? []
+            guard let tags = categoryTagMap[categoryAlias] else { continue }
             for tag in tags {
                 if let idx = InterestVocabulary.index(of: tag) {
                     placeVector[idx] = 1.0
@@ -116,13 +126,17 @@ struct SearchController: RouteCollection {
             }
         }
 
-        // Cosine similarity
-        let dotProduct = zip(viewerVector, placeVector).reduce(Float(0)) { $0 + $1.0 * $1.1 }
-        let normA = sqrt(viewerVector.reduce(Float(0)) { $0 + $1 * $1 })
-        let normB = sqrt(placeVector.reduce(Float(0)) { $0 + $1 * $1 })
-
-        guard normA > 0, normB > 0 else { return 0 }
-        return dotProduct / (normA * normB)
+        // Cosine similarity — fused dot + norm-B loop, no intermediate zip array.
+        var dot: Float = 0
+        var sumSqB: Float = 0
+        for i in 0..<viewerVector.count {
+            let b = placeVector[i]
+            dot += viewerVector[i] * b
+            sumSqB += b * b
+        }
+        let normB = sqrt(sumSqB)
+        guard normB > 0 else { return 0 }
+        return dot / (viewerNorm * normB)
     }
 
     // MARK: - Load Vector from DB

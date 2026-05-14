@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 import CoreLocation
 import TidepoolShared
 
@@ -31,10 +32,18 @@ class YelpEnrichmentManager: ObservableObject {
 
         if !BackendClient.shared.isAuthenticated {
             print("[Enrichment] Not authenticated, waiting briefly...")
-            // Wait up to 3 seconds for auth to complete
-            for _ in 0..<6 {
-                try? await Task.sleep(nanoseconds: 500_000_000)
-                if BackendClient.shared.isAuthenticated { break }
+            // Resume the moment auth flips, instead of polling every 500ms.
+            // Cap the wait at 3s to avoid hanging forever if auth fails.
+            let authPublisher = BackendClient.shared.$isAuthenticated
+            await withTaskGroup(of: Void.self) { group in
+                group.addTask {
+                    for await isAuth in authPublisher.values where isAuth { return }
+                }
+                group.addTask {
+                    try? await Task.sleep(nanoseconds: 3_000_000_000)
+                }
+                _ = await group.next()
+                group.cancelAll()
             }
         }
 

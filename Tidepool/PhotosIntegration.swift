@@ -100,9 +100,6 @@ class PhotosIntegrationManager: ObservableObject {
             await self.fetchPhotoLocationsBackground()
         }.value
 
-        // Clear POI cache to get fresh results
-        userDefaults.removeObject(forKey: poiCacheKey)
-
         // Step 2: Build frequency grid and find hotspots (deterministic, pure math)
         let hotspots = await Task.detached(priority: .userInitiated) {
             self.findHotspots(photoLocations, metersPerCell: 30, minPhotos: 3)
@@ -273,8 +270,9 @@ class PhotosIntegrationManager: ObservableObject {
             }
         }
 
-        // Update cache
-        var newCache: [String: [String]] = [:]
+        // Merge new resolutions into the existing cache so previously-resolved
+        // hotspots stay cached even when they don't appear in this run.
+        var newCache: [String: [String]] = cache.mapValues { [$0.name, $0.category] }
         for cluster in results where cluster.inferredName != nil {
             let key = String(format: "%.4f_%.4f", cluster.centerCoordinate.latitude, cluster.centerCoordinate.longitude)
             newCache[key] = [cluster.inferredName!, cluster.category.rawValue]
@@ -297,12 +295,7 @@ class PhotosIntegrationManager: ObservableObject {
             request.naturalLanguageQuery = ""
             request.region = MKCoordinateRegion(center: center, latitudinalMeters: radiusMeters, longitudinalMeters: radiusMeters)
             MKLocalSearch(request: request).start { response, _ in
-                let best = response?.mapItems
-                    .filter { $0.name != nil && $0.placemark.location != nil }
-                    .filter { $0.placemark.location!.distance(from: location) <= radiusMeters }
-                    .sorted { ($0.placemark.location?.distance(from: location) ?? .infinity) < ($1.placemark.location?.distance(from: location) ?? .infinity) }
-                    .first
-                continuation.resume(returning: best)
+                continuation.resume(returning: Self.nearestNamed(in: response?.mapItems, to: location, within: radiusMeters))
             }
         }
 
@@ -314,12 +307,7 @@ class PhotosIntegrationManager: ObservableObject {
         let poiResult = await withCheckedContinuation { (continuation: CheckedContinuation<MKMapItem?, Never>) in
             let request = MKLocalPointsOfInterestRequest(center: center, radius: radiusMeters)
             MKLocalSearch(request: request).start { response, _ in
-                let best = response?.mapItems
-                    .filter { $0.name != nil && $0.placemark.location != nil }
-                    .filter { $0.placemark.location!.distance(from: location) <= radiusMeters }
-                    .sorted { ($0.placemark.location?.distance(from: location) ?? .infinity) < ($1.placemark.location?.distance(from: location) ?? .infinity) }
-                    .first
-                continuation.resume(returning: best)
+                continuation.resume(returning: Self.nearestNamed(in: response?.mapItems, to: location, within: radiusMeters))
             }
         }
 
@@ -343,6 +331,15 @@ class PhotosIntegrationManager: ObservableObject {
         }
 
         return nil
+    }
+
+    private static func nearestNamed(in items: [MKMapItem]?, to location: CLLocation, within radius: CLLocationDistance) -> MKMapItem? {
+        items?.compactMap { item -> (MKMapItem, CLLocationDistance)? in
+            guard item.name != nil, let d = item.placemark.location?.distance(from: location), d <= radius else { return nil }
+            return (item, d)
+        }
+        .min(by: { $0.1 < $1.1 })?
+        .0
     }
 
     private func inferPlaceCategory(from placemark: CLPlacemark) -> PlaceCategory {
@@ -406,166 +403,10 @@ class PhotosIntegrationManager: ObservableObject {
             .map { $0.toPhotoLocationCluster() }
     }
     
-    private func fetchPhotoLocations() async -> [PhotoLocation] {
-        return await withCheckedContinuation { continuation in
-            let fetchOptions = PHFetchOptions()
-            fetchOptions.includeHiddenAssets = false
-            
-            let assets = PHAsset.fetchAssets(with: .image, options: fetchOptions)
-            var photoLocations: [PhotoLocation] = []
-            
-            assets.enumerateObjects { asset, _, _ in
-                guard let location = asset.location else { return }
-                
-                let photoLocation = PhotoLocation(
-                    coordinate: location.coordinate,
-                    timestamp: asset.creationDate ?? Date(),
-                    asset: asset
-                )
-                photoLocations.append(photoLocation)
-            }
-            
-            continuation.resume(returning: photoLocations)
-        }
-    }
-    
-    private func clusterLocations(_ locations: [PhotoLocation]) async -> [PhotoLocationCluster] {
-        guard !locations.isEmpty else { return [] }
-        
-        // Sort by timestamp for temporal analysis
-        let sortedLocations = locations.sorted { $0.timestamp < $1.timestamp }
-        var clusters: [LocationClusterBuilder] = []
-        
-        for location in sortedLocations {
-            var addedToCluster = false
-            
-            // Try to add to existing cluster
-            for cluster in clusters {
-                if cluster.canAdd(location, maxRadius: maxClusterRadius) {
-                    cluster.add(location)
-                    addedToCluster = true
-                    break
-                }
-            }
-            
-            // Create new cluster if needed
-            if !addedToCluster {
-                let newCluster = LocationClusterBuilder(initialLocation: location)
-                clusters.append(newCluster)
-            }
-        }
-        
-        // Filter and convert to final clusters
-        return clusters
-            .filter { $0.locations.count >= minPhotosPerCluster }
-            .sorted { $0.interestScore > $1.interestScore }
-            .prefix(maxClusters)
-            .map { $0.toPhotoLocationCluster() }
-    }
-    
-    private func enhanceClustersWithPlaceData(_ clusters: [PhotoLocationCluster]) async -> [PhotoLocationCluster] {
-        // Process clusters concurrently (up to 5 at a time to avoid geocoder rate limits)
-        return await withTaskGroup(of: (Int, PhotoLocationCluster).self) { group in
-            for (i, cluster) in clusters.enumerated() {
-                group.addTask {
-                    let enhanced = await self.enhanceClusterWithPlaceInfo(cluster)
-                    return (i, enhanced)
-                }
-            }
-            var results = [(Int, PhotoLocationCluster)]()
-            for await result in group {
-                results.append(result)
-            }
-            return results.sorted { $0.0 < $1.0 }.map { $0.1 }
-        }
-    }
-    
-    private func enhanceClusterWithPlaceInfo(_ cluster: PhotoLocationCluster) async -> PhotoLocationCluster {
-        let location = CLLocation(latitude: cluster.centerCoordinate.latitude, longitude: cluster.centerCoordinate.longitude)
-
-        // Step 1: Reverse geocode
-        let placemark = await withCheckedContinuation { (continuation: CheckedContinuation<CLPlacemark?, Never>) in
-            CLGeocoder().reverseGeocodeLocation(location) { placemarks, _ in
-                continuation.resume(returning: placemarks?.first)
-            }
-        }
-
-        let geocodedName = placemark.flatMap { generatePlaceName(from: $0) }
-        let geocodedCategory = placemark.map { inferPlaceCategory(from: $0) } ?? .other
-
-        // Step 2: MKLocalSearch to find actual business
-        let searchName = geocodedName ?? "place"
-        let searchResult = await withCheckedContinuation { (continuation: CheckedContinuation<MKMapItem?, Never>) in
-            let request = MKLocalSearch.Request()
-            request.naturalLanguageQuery = searchName
-            request.region = MKCoordinateRegion(
-                center: cluster.centerCoordinate,
-                latitudinalMeters: 200,
-                longitudinalMeters: 200
-            )
-            MKLocalSearch(request: request).start { response, _ in
-                // Pick closest match within 100m
-                let best = response?.mapItems.first { item in
-                    guard let itemLoc = item.placemark.location else { return false }
-                    return itemLoc.distance(from: location) < 100
-                }
-                continuation.resume(returning: best ?? response?.mapItems.first)
-            }
-        }
-
-        let resolvedName = searchResult?.name ?? geocodedName
-        let resolvedCategory = searchResult.flatMap { PlaceCategory.from(mapItem: $0) } ?? geocodedCategory
-        let resolvedCoord = searchResult?.placemark.location?.coordinate ?? cluster.centerCoordinate
-        let poiId = resolvedName.map { FavoriteLocation.stablePlaceId(name: $0, coordinate: resolvedCoord) }
-
-        // Step 3: Try Yelp match (best-effort)
-        var yelpId: String? = nil
-        if let name = resolvedName {
-            yelpId = try? await BackendClient.shared.matchPlace(
-                name: name, lat: resolvedCoord.latitude, lng: resolvedCoord.longitude
-            ).yelpID
-        }
-
-        return PhotoLocationCluster(
-            centerCoordinate: resolvedCoord,
-            radius: cluster.radius,
-            photoCount: cluster.photoCount,
-            frequencyScore: cluster.frequencyScore,
-            timeSpentScore: cluster.timeSpentScore,
-            category: resolvedCategory,
-            inferredName: resolvedName,
-            poiId: poiId,
-            yelpId: yelpId,
-            firstVisit: cluster.firstVisit,
-            lastVisit: cluster.lastVisit
-        )
-    }
-    
-    // inferPlaceCategory is defined above in the POI resolution section
-    
-    private func generatePlaceName(from placemark: CLPlacemark) -> String? {
-        if let name = placemark.name, !name.isEmpty {
-            return name
-        }
-        
-        // Generate a descriptive name from address components
-        var nameComponents: [String] = []
-        
-        if let thoroughfare = placemark.thoroughfare {
-            nameComponents.append(thoroughfare)
-        }
-        
-        if let locality = placemark.locality {
-            nameComponents.append(locality)
-        }
-        
-        return nameComponents.isEmpty ? nil : nameComponents.joined(separator: ", ")
-    }
-    
     private func dateRangeFrom(_ locations: [PhotoLocation]) -> ClosedRange<Date>? {
-        guard !locations.isEmpty else { return nil }
         let dates = locations.map { $0.timestamp }.sorted()
-        return dates.first!...dates.last!
+        guard let first = dates.first, let last = dates.last else { return nil }
+        return first...last
     }
     
     func getInterestTags() -> [String: Int] {
@@ -658,7 +499,6 @@ class PhotosIntegrationManager: ObservableObject {
         guard !clusters.isEmpty else { return nil }
 
         let photoCount = metrics?.totalPhotos ?? userDefaults.integer(forKey: "photos_total_count")
-        let geotagged = metrics?.locationEnabledPhotos ?? clusters.reduce(0) { $0 + $1.photoCount }
         let nonHome = clusters.filter { $0.category != .home }
         let namedCount = nonHome.filter { InterestVectorManager.isLegitPlaceName($0) }.count
 
@@ -720,9 +560,9 @@ private class LocationClusterBuilder {
     }
     
     private var timeSpanDays: Double {
-        guard locations.count > 1 else { return 1.0 }
         let timestamps = locations.map { $0.timestamp }.sorted()
-        let span = timestamps.last!.timeIntervalSince(timestamps.first!)
+        guard let first = timestamps.first, let last = timestamps.last else { return 1.0 }
+        let span = last.timeIntervalSince(first)
         return max(span / (24 * 60 * 60), 1.0) // Convert to days, minimum 1 day
     }
     

@@ -5,7 +5,7 @@ import CoreLocation
 struct ManualLocationImportView: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var appleMapsManager: AppleMapsIntegrationManager
-    @StateObject private var locationManager = LocationManager()
+    @ObservedObject private var locationManager = LocationManager.shared
     
     @State private var searchText = ""
     @State private var searchResults: [MKMapItem] = []

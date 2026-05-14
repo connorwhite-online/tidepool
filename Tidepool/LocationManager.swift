@@ -1,7 +1,13 @@
 import Foundation
 import CoreLocation
 
+@MainActor
 final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelegate {
+    /// Single shared instance — there's only ever supposed to be one
+    /// CLLocationManager per app, and having each view make its own meant
+    /// six separate manager+delegate pairs each tracking auth + location.
+    static let shared = LocationManager()
+
     @Published var authorizationStatus: CLAuthorizationStatus = .notDetermined
     @Published var latestLocation: CLLocation?
     @Published var homeLocation: CLLocationCoordinate2D? {
@@ -11,7 +17,7 @@ final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelega
     private let manager = CLLocationManager()
     private let homeKey = "home_location"
 
-    override init() {
+    private override init() {
         super.init()
         manager.delegate = self
         manager.desiredAccuracy = kCLLocationAccuracyHundredMeters

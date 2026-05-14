@@ -2,11 +2,17 @@ import Foundation
 import CoreLocation
 import TidepoolShared
 
+@MainActor
 final class PresenceReporter {
     private weak var locationManager: LocationManager?
     private var timer: Timer?
     private var lastReportedTileString: String?
     private var lastReportAtForTile: [String: Date] = [:]
+
+    // Hidden-places cache so we don't JSON-decode UserDefaults on every tick.
+    // Keyed by the raw Data so any write through @AppStorage invalidates it.
+    private var hiddenPlacesCacheKey: Data?
+    private var hiddenPlacesCache: [HiddenPlace] = []
 
     // Jittered interval between reports (in seconds)
     private let minIntervalSec: TimeInterval = 15
@@ -46,12 +52,9 @@ final class PresenceReporter {
             let homeCL = CLLocation(latitude: home.latitude, longitude: home.longitude)
             if loc.distance(from: homeCL) < homeHideRadiusMeters { return }
         }
-        if let data = UserDefaults.standard.data(forKey: "hidden_places_data"),
-           let places = try? JSONDecoder().decode([HiddenPlace].self, from: data) {
-            for place in places {
-                let placeCL = CLLocation(latitude: place.latitude, longitude: place.longitude)
-                if loc.distance(from: placeCL) < homeHideRadiusMeters { return }
-            }
+        for place in hiddenPlaces() {
+            let placeCL = CLLocation(latitude: place.latitude, longitude: place.longitude)
+            if loc.distance(from: placeCL) < homeHideRadiusMeters { return }
         }
 
         let tileString = Tiling.current.tileIdString(for: loc.coordinate)
@@ -76,4 +79,12 @@ final class PresenceReporter {
             }
         }
     }
-} 
+
+    private func hiddenPlaces() -> [HiddenPlace] {
+        let data = UserDefaults.standard.data(forKey: "hidden_places_data") ?? Data()
+        if data == hiddenPlacesCacheKey { return hiddenPlacesCache }
+        hiddenPlacesCacheKey = data
+        hiddenPlacesCache = (try? JSONDecoder().decode([HiddenPlace].self, from: data)) ?? []
+        return hiddenPlacesCache
+    }
+}

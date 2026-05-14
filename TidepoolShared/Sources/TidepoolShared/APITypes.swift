@@ -362,16 +362,21 @@ public struct FavoriteResponse: Codable, Sendable {
     public let yelpID: String?
     public let name: String
     public let category: PlaceCategory
+    public let latitude: Double
+    public let longitude: Double
     public let rating: Int?
     public let createdAt: String
 
     public init(id: String, placeID: String, yelpID: String?, name: String,
-                category: PlaceCategory, rating: Int?, createdAt: String) {
+                category: PlaceCategory, latitude: Double, longitude: Double,
+                rating: Int?, createdAt: String) {
         self.id = id
         self.placeID = placeID
         self.yelpID = yelpID
         self.name = name
         self.category = category
+        self.latitude = latitude
+        self.longitude = longitude
         self.rating = rating
         self.createdAt = createdAt
     }
@@ -380,7 +385,7 @@ public struct FavoriteResponse: Codable, Sendable {
         case id
         case placeID = "place_id"
         case yelpID = "yelp_id"
-        case name, category, rating
+        case name, category, latitude, longitude, rating
         case createdAt = "created_at"
     }
 }

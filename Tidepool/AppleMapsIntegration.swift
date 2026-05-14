@@ -330,37 +330,6 @@ class AppleMapsIntegrationManager: ObservableObject {
         return tagCounts
     }
     
-    /// Generate normalized interest vector from tags
-    func getInterestVector() -> [Float] {
-        let tagCounts = getInterestTags()
-        
-        // Define a canonical vocabulary of tags (this would be expanded)
-        let vocabulary = [
-            "dining", "coffee", "nightlife", "outdoor", "fitness", "culture",
-            "shopping", "entertainment", "social", "nature", "health", "education",
-            "quiet", "convenience", "recreation", "arts", "indoor", "exercise"
-        ]
-        
-        // Create vector with TF-IDF-like weighting
-        var vector: [Float] = Array(repeating: 0.0, count: vocabulary.count)
-        let totalLocations = Float(savedLocations.count)
-        
-        for (index, tag) in vocabulary.enumerated() {
-            if let count = tagCounts[tag], totalLocations > 0 {
-                // Simple frequency normalization
-                vector[index] = Float(count) / totalLocations
-            }
-        }
-        
-        // Normalize vector
-        let magnitude = sqrt(vector.map { $0 * $0 }.reduce(0, +))
-        if magnitude > 0 {
-            vector = vector.map { $0 / magnitude }
-        }
-        
-        return vector
-    }
-    
     /// Import locations from MKMapItems (for manual import flow)
     func importFromMapItems(_ mapItems: [MKMapItem]) {
         let newLocations = mapItems.compactMap { mapItem -> SavedLocation? in

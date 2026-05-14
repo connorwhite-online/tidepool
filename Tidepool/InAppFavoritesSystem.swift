@@ -335,7 +335,10 @@ class InAppFavoritesManager: ObservableObject {
                         placeId: remoteFav.placeID,
                         name: remoteFav.name,
                         category: localCategory,
-                        coordinate: CLLocationCoordinate2D(latitude: 0, longitude: 0),
+                        coordinate: CLLocationCoordinate2D(
+                            latitude: remoteFav.latitude,
+                            longitude: remoteFav.longitude
+                        ),
                         rating: remoteFav.rating
                     )
                     favorites.append(local)

@@ -85,6 +85,8 @@ struct FavoritesController: RouteCollection {
             yelpID: fav.yelpID,
             name: fav.name,
             category: PlaceCategory(rawValue: fav.category) ?? .other,
+            latitude: fav.latitude,
+            longitude: fav.longitude,
             rating: fav.rating,
             createdAt: ISO8601DateFormatter().string(from: fav.createdAt)
         )

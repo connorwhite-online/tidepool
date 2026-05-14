@@ -10,7 +10,7 @@ struct PresenceCircleOverlay: Identifiable {
 }
 
 struct MapHomeView: View {
-    @StateObject private var location = LocationManager()
+    @ObservedObject private var location = LocationManager.shared
     @State private var presenceOverlays: [PresenceCircleOverlay] = []
     @State private var heatOverlays: [HeatCircleOverlay] = []
     @State private var heatBlobGroups: [HeatBlobGroup] = []
@@ -131,38 +131,6 @@ struct MapHomeView: View {
         } else {
             presenceOverlays = []
         }
-    }
-
-    // MARK: - POIs are now handled natively by MapKit
-
-    private func isCoordinateInsideAnyHeat(_ coord: CLLocationCoordinate2D) -> Bool {
-        // Approximate: within any blob group's stroked hull radius envelope
-        for group in heatBlobGroups {
-            guard let first = group.points.first else { continue }
-            // Use distance to each point within group allowing per-user radius + a small blend
-            for p in group.points {
-                let d = distanceMeters(coord, p)
-                if d <= group.perUserRadiusMeters * 1.2 { return true }
-            }
-            // Fallback: within 80 m of group centroid
-            let centroid = centroidOf(group.points)
-            if distanceMeters(coord, centroid) <= max(80, group.perUserRadiusMeters) { return true }
-            _ = first // silence unused warning if needed
-        }
-        return false
-    }
-
-    private func centroidOf(_ coords: [CLLocationCoordinate2D]) -> CLLocationCoordinate2D {
-        var sx: Double = 0, sy: Double = 0
-        for c in coords { sx += c.latitude; sy += c.longitude }
-        let n = Double(max(coords.count, 1))
-        return CLLocationCoordinate2D(latitude: sx / n, longitude: sy / n)
-    }
-
-    private func distanceMeters(_ a: CLLocationCoordinate2D, _ b: CLLocationCoordinate2D) -> CLLocationDistance {
-        let la = CLLocation(latitude: a.latitude, longitude: a.longitude)
-        let lb = CLLocation(latitude: b.latitude, longitude: b.longitude)
-        return la.distance(from: lb)
     }
 
     // MARK: - Heat Tile Fetching
