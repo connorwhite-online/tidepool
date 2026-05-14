@@ -181,9 +181,6 @@ struct ContentView: View {
                 category: category,
                 coordinate: coordinate,
                 address: mapItem.placemark.title,
-                phoneNumber: mapItem.phoneNumber,
-                website: nil,
-                hours: nil,
                 rating: nil,
                 priceLevel: nil,
                 userFavoriteStatus: favoriteStatus
@@ -211,9 +208,6 @@ struct ContentView: View {
                 category: favorite.category,
                 coordinate: favorite.coordinate,
                 address: nil,
-                phoneNumber: nil,
-                website: nil,
-                hours: nil,
                 rating: favorite.rating.map { Double($0) },
                 priceLevel: nil,
                 userFavoriteStatus: favoriteStatus
@@ -554,7 +548,6 @@ struct MapSearchSheet: View {
 @MainActor
 final class ForYouRecommendationLoader: ObservableObject {
     @Published var recommendations: [MKMapItem] = []
-    @Published var serverResults: [PlaceSearchResult] = []
     @Published var isLoading = false
 
     /// Load recommendations — tries server-backed blended search first, falls back to local MapKit.

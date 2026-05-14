@@ -6,7 +6,6 @@ import TidepoolShared
 final class PresenceReporter {
     private weak var locationManager: LocationManager?
     private var timer: Timer?
-    private var lastReportedTileString: String?
     private var lastReportAtForTile: [String: Date] = [:]
 
     // Hidden-places cache so we don't JSON-decode UserDefaults on every tick.
@@ -64,7 +63,6 @@ final class PresenceReporter {
             return
         }
 
-        lastReportedTileString = tileString
         lastReportAtForTile[tileString] = now
 
         let epochMs = Int64(now.timeIntervalSince1970 * 1000)

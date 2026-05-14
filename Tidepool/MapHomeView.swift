@@ -245,9 +245,6 @@ struct MapHomeView: View {
             category: category,
             coordinate: annotation.coordinate,
             address: nil,
-            phoneNumber: nil,
-            website: nil,
-            hours: nil,
             rating: favorite.flatMap { $0.rating }.map { Double($0) },
             priceLevel: nil,
             userFavoriteStatus: favoriteStatus
