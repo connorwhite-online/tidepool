@@ -248,10 +248,8 @@ struct MapHomeView: View {
             phoneNumber: nil,
             website: nil,
             hours: nil,
-            images: [],
             rating: favorite.flatMap { $0.rating }.map { Double($0) },
             priceLevel: nil,
-            amenities: [],
             userFavoriteStatus: favoriteStatus
         )
     }

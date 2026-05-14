@@ -184,10 +184,8 @@ struct ContentView: View {
                 phoneNumber: mapItem.phoneNumber,
                 website: nil,
                 hours: nil,
-                images: [],
                 rating: nil,
                 priceLevel: nil,
-                amenities: [],
                 userFavoriteStatus: favoriteStatus
             )
             HapticFeedbackManager.shared.impact(.light)
@@ -216,10 +214,8 @@ struct ContentView: View {
                 phoneNumber: nil,
                 website: nil,
                 hours: nil,
-                images: [],
                 rating: favorite.rating.map { Double($0) },
                 priceLevel: nil,
-                amenities: [],
                 userFavoriteStatus: favoriteStatus
             )
             HapticFeedbackManager.shared.impact(.light)

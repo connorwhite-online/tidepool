@@ -286,21 +286,6 @@ class InterestVectorManager: ObservableObject {
         }
     }
     
-    func similarityTo(otherVector: [Float]) -> Float {
-        guard currentVector.count == otherVector.count,
-              !currentVector.allSatisfy({ $0 == 0 }),
-              !otherVector.allSatisfy({ $0 == 0 }) else {
-            return 0.0
-        }
-        
-        // Cosine similarity
-        let dotProduct = zip(currentVector, otherVector).map(*).reduce(0, +)
-        let magnitudeA = sqrt(currentVector.map { $0 * $0 }.reduce(0, +))
-        let magnitudeB = sqrt(otherVector.map { $0 * $0 }.reduce(0, +))
-        
-        return dotProduct / (magnitudeA * magnitudeB)
-    }
-    
     func getTopInterests(limit: Int = 10) -> [(tag: String, weight: Float)] {
         let tagWeights = zip(vocabulary, currentVector).map { (tag: $0, weight: $1) }
         return tagWeights
