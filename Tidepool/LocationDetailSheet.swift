@@ -168,6 +168,63 @@ private struct LocationDetailContent: View {
         enrichment?.isOpenNow
     }
 
+    // MARK: - Photos carousel
+
+    /// Square photo tile size. Larger than the previous 140×100, and 1:1
+    /// reads as more "card-like" alongside the rest of the sheet.
+    private let photoTileSize: CGFloat = 160
+
+    /// Number of skeleton tiles shown while enrichment is still loading.
+    /// Matches the upper bound on real photos (we show up to 5).
+    private let skeletonCount = 5
+
+    /// Show the carousel while enrichment is loading (skeletons reserve the
+    /// space) and after it loads if there's at least one photo. Only fully
+    /// hidden once we know there are zero photos to display.
+    private var showPhotosCarousel: Bool {
+        enrichment == nil || !(enrichment?.photos.isEmpty ?? true)
+    }
+
+    @ViewBuilder
+    private var photosCarousel: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 10) {
+                if let photos = enrichment?.photos {
+                    ForEach(photos.prefix(skeletonCount), id: \.url) { photo in
+                        RemoteImage(
+                            url: photo.url,
+                            targetSize: CGSize(width: photoTileSize, height: photoTileSize)
+                        ) { image in
+                            image
+                                .resizable()
+                                .aspectRatio(contentMode: .fill)
+                                .frame(width: photoTileSize, height: photoTileSize)
+                                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        } placeholder: {
+                            photoSkeleton
+                        }
+                    }
+                } else {
+                    ForEach(0..<skeletonCount, id: \.self) { _ in
+                        photoSkeleton
+                    }
+                }
+            }
+            // First/last tile align with the sheet's 20pt gutter; the
+            // ScrollView itself bleeds edge-to-edge below so tiles slide
+            // past the gutter as you scroll rather than getting clipped.
+            .padding(.horizontal, 20)
+        }
+        .frame(height: photoTileSize)
+        .padding(.horizontal, -20)
+    }
+
+    private var photoSkeleton: some View {
+        RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .fill(Color(UIColor.tertiarySystemFill))
+            .frame(width: photoTileSize, height: photoTileSize)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             // Drag indicator
@@ -176,32 +233,6 @@ private struct LocationDetailContent: View {
                 .frame(width: 36, height: 5)
                 .frame(maxWidth: .infinity)
                 .padding(.top, 14)
-
-            // Photos carousel (from Yelp)
-            if let photos = enrichment?.photos, !photos.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        ForEach(photos.prefix(5), id: \.url) { photo in
-                            RemoteImage(
-                                url: photo.url,
-                                targetSize: CGSize(width: 140, height: 100)
-                            ) { image in
-                                image
-                                    .resizable()
-                                    .aspectRatio(contentMode: .fill)
-                                    .frame(width: 140, height: 100)
-                                    .clipShape(RoundedRectangle(cornerRadius: 10))
-                            } placeholder: {
-                                RoundedRectangle(cornerRadius: 10)
-                                    .fill(.quaternary)
-                                    .frame(width: 140, height: 100)
-                                    .overlay(ProgressView().tint(.secondary))
-                            }
-                        }
-                    }
-                }
-                .frame(height: 100)
-            }
 
             // Name + category + star
             HStack(alignment: .firstTextBaseline, spacing: 12) {
@@ -308,6 +339,15 @@ private struct LocationDetailContent: View {
                 .buttonStyle(.bordered)
             }
             .controlSize(.large)
+
+            // Photos carousel. Placed below the data so the sheet's primary
+            // info is visible without scrolling. The carousel reserves its
+            // height up front via 5 skeleton tiles while enrichment loads —
+            // when photos resolve they swap into place with no layout shift.
+            // Hidden only after enrichment finishes with zero photos.
+            if showPhotosCarousel {
+                photosCarousel
+            }
         }
         .padding(.horizontal, 20)
         .padding(.bottom, 24)
