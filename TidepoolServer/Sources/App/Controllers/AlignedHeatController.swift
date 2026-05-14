@@ -35,57 +35,48 @@ struct AlignedHeatController: RouteCollection {
         let simLookup = Dictionary(uniqueKeysWithValues: similarUsers.map { ($0.id, $0.similarity) })
         let deviceList = similarUsers.map { "'\($0.id)'::uuid" }.joined(separator: ",")
 
-        // Pad the viewport a little so a visit recorded a few meters outside
-        // the snapped tile grid still contributes. ~10m at the equator.
-        let latPad = 0.0001
-        let lonPad = 0.0001
-        let minLat = min(body.viewport.sw.latitude, body.viewport.ne.latitude) - latPad
-        let maxLat = max(body.viewport.sw.latitude, body.viewport.ne.latitude) + latPad
-        let minLon = min(body.viewport.sw.longitude, body.viewport.ne.longitude) - lonPad
-        let maxLon = max(body.viewport.sw.longitude, body.viewport.ne.longitude) + lonPad
+        // Enumerate the viewport's tile IDs once on the server. tile_id is a
+        // GENERATED column on visits, so the SQL groups by it directly and
+        // returns one row per (device, tile, hour) instead of one row per
+        // (device, exact lat, exact lng, hour). That's typically a 5-10x
+        // reduction in rows shipped for a city-scale user.
+        let viewportTileIDs = GridTiler.tilesInBounds(sw: body.viewport.sw, ne: body.viewport.ne)
+            .map { $0.description }
+        guard !viewportTileIDs.isEmpty else {
+            let meta = HeatTileMeta(kMin: kMin, epsilon: epsilon, ttlSeconds: 900)
+            return HeatTileResponse(tiles: [], meta: meta)
+        }
 
-        // Query visits with individual device_id for similarity weighting.
-        // Bound by viewport lat/lng so we don't ship the entire user's history
-        // across the network just to drop most of it in the viewportTiles
-        // membership check below.
+        // Query visits with individual device_id for similarity weighting,
+        // grouped by precomputed tile_id.
         let visitRows = try await sql.raw(SQLQueryString("""
-            SELECT device_id::text as device_id, latitude, longitude, hour_of_day,
+            SELECT device_id::text as device_id, tile_id, hour_of_day,
                    COUNT(*) as visit_count
             FROM visits
             WHERE device_id IN (\(unsafeRaw: deviceList))
-              AND latitude BETWEEN \(unsafeRaw: String(minLat)) AND \(unsafeRaw: String(maxLat))
-              AND longitude BETWEEN \(unsafeRaw: String(minLon)) AND \(unsafeRaw: String(maxLon))
+              AND tile_id = ANY(\(bind: viewportTileIDs)::text[])
               AND (day_of_week = \(unsafeRaw: String(body.currentDayOfWeek))
                    OR day_of_week = \(unsafeRaw: String((body.currentDayOfWeek + 6) % 7))
                    OR day_of_week = \(unsafeRaw: String((body.currentDayOfWeek + 1) % 7)))
-            GROUP BY device_id, latitude, longitude, hour_of_day
+            GROUP BY device_id, tile_id, hour_of_day
             """)).all(decoding: WeightedVisitRow.self)
 
-        // Snap to tiles and compute weighted intensity
+        // Compute weighted intensity per tile.
         var tileScores: [String: Float] = [:]
         var tileContributors: [String: Set<String>] = [:]
 
         for row in visitRows {
-            let coord = Coordinate(latitude: row.latitude, longitude: row.longitude)
-            let tileID = GridTiler.tileID(for: coord).description
-
             let similarity = simLookup[row.device_id] ?? 0.1
             let frequency = min(Float(row.visit_count) / 20.0, 1.0)
             let timeRelevance = gaussianTimeRelevance(visitHour: row.hour_of_day, currentHour: body.currentHour)
 
             let score = similarity * frequency * timeRelevance
-            tileScores[tileID, default: 0] += score
-            tileContributors[tileID, default: []].insert(row.device_id)
+            tileScores[row.tile_id, default: 0] += score
+            tileContributors[row.tile_id, default: []].insert(row.device_id)
         }
 
-        // Filter by viewport and k-anonymity
-        let viewportTiles = Set(
-            GridTiler.tilesInBounds(sw: body.viewport.sw, ne: body.viewport.ne)
-                .map { $0.description }
-        )
-
         var heatTiles: [HeatTile] = []
-        for (tileStr, score) in tileScores where viewportTiles.contains(tileStr) {
+        for (tileStr, score) in tileScores {
             let contributorCount = tileContributors[tileStr]?.count ?? 0
             guard contributorCount >= kMin else { continue }
 
@@ -143,8 +134,7 @@ struct AlignedHeatController: RouteCollection {
 
     private struct WeightedVisitRow: Decodable {
         let device_id: String
-        let latitude: Double
-        let longitude: Double
+        let tile_id: String
         let hour_of_day: Int
         let visit_count: Int
     }
