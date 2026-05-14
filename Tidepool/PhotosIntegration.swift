@@ -50,12 +50,6 @@ class PhotosIntegrationManager: ObservableObject {
     private let lastProcessedKey = "photos_last_processed"
     private let clustersKey = "photos_location_clusters"
     
-    // Clustering parameters
-    private let minClusterRadius: Double = 50.0 // 50 meters
-    private let maxClusterRadius: Double = 500.0 // 500 meters
-    private let minPhotosPerCluster: Int = 3
-    private let maxClusters: Int = .max
-    
     init() {
         authorizationStatus = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         isEnabled = userDefaults.bool(forKey: enabledKey)
@@ -375,34 +369,6 @@ class PhotosIntegrationManager: ObservableObject {
         return photoLocations
     }
 
-    /// Cluster locations synchronously (pure computation, no UI).
-    private nonisolated func clusterLocationsSync(_ locations: [PhotoLocation]) -> [PhotoLocationCluster] {
-        guard !locations.isEmpty else { return [] }
-
-        let sortedLocations = locations.sorted { $0.timestamp < $1.timestamp }
-        var clusters: [LocationClusterBuilder] = []
-
-        for location in sortedLocations {
-            var addedToCluster = false
-            for cluster in clusters {
-                if cluster.canAdd(location, maxRadius: maxClusterRadius) {
-                    cluster.add(location)
-                    addedToCluster = true
-                    break
-                }
-            }
-            if !addedToCluster {
-                clusters.append(LocationClusterBuilder(initialLocation: location))
-            }
-        }
-
-        return clusters
-            .filter { $0.locations.count >= minPhotosPerCluster }
-            .sorted { $0.interestScore > $1.interestScore }
-            .prefix(maxClusters)
-            .map { $0.toPhotoLocationCluster() }
-    }
-    
     private func dateRangeFrom(_ locations: [PhotoLocation]) -> ClosedRange<Date>? {
         let dates = locations.map { $0.timestamp }.sorted()
         guard let first = dates.first, let last = dates.last else { return nil }
@@ -517,99 +483,6 @@ private struct PhotoLocation {
     let coordinate: CLLocationCoordinate2D
     let timestamp: Date
     let asset: PHAsset
-}
-
-private class LocationClusterBuilder {
-    var locations: [PhotoLocation] = []
-    var centerCoordinate: CLLocationCoordinate2D
-    
-    init(initialLocation: PhotoLocation) {
-        self.locations = [initialLocation]
-        self.centerCoordinate = initialLocation.coordinate
-    }
-    
-    func canAdd(_ location: PhotoLocation, maxRadius: Double) -> Bool {
-        let distance = CLLocation(latitude: centerCoordinate.latitude, longitude: centerCoordinate.longitude)
-            .distance(from: CLLocation(latitude: location.coordinate.latitude, longitude: location.coordinate.longitude))
-        return distance <= maxRadius
-    }
-    
-    func add(_ location: PhotoLocation) {
-        locations.append(location)
-        updateCenter()
-    }
-    
-    private func updateCenter() {
-        let totalLat = locations.map { $0.coordinate.latitude }.reduce(0, +)
-        let totalLng = locations.map { $0.coordinate.longitude }.reduce(0, +)
-        let count = Double(locations.count)
-        
-        centerCoordinate = CLLocationCoordinate2D(
-            latitude: totalLat / count,
-            longitude: totalLng / count
-        )
-    }
-    
-    var interestScore: Double {
-        let photoCount = Double(locations.count)
-        let timeSpan = timeSpanDays
-        let frequency = photoCount / max(timeSpan, 1.0)
-        
-        // Score based on frequency and total photos
-        return frequency * log(photoCount + 1)
-    }
-    
-    private var timeSpanDays: Double {
-        let timestamps = locations.map { $0.timestamp }.sorted()
-        guard let first = timestamps.first, let last = timestamps.last else { return 1.0 }
-        let span = last.timeIntervalSince(first)
-        return max(span / (24 * 60 * 60), 1.0) // Convert to days, minimum 1 day
-    }
-    
-    func toPhotoLocationCluster() -> PhotoLocationCluster {
-        let timestamps = locations.map { $0.timestamp }.sorted()
-        let radius = calculateRadius()
-        
-        return PhotoLocationCluster(
-            centerCoordinate: centerCoordinate,
-            radius: radius,
-            photoCount: locations.count,
-            frequencyScore: calculateFrequencyScore(),
-            timeSpentScore: calculateTimeSpentScore(),
-            category: .other, // Will be enhanced later
-            inferredName: nil, // Will be enhanced later
-            poiId: nil,
-            yelpId: nil,
-            firstVisit: timestamps.first ?? Date(),
-            lastVisit: timestamps.last ?? Date()
-        )
-    }
-    
-    private func calculateRadius() -> Double {
-        guard locations.count > 1 else { return 50.0 }
-        
-        let center = CLLocation(latitude: centerCoordinate.latitude, longitude: centerCoordinate.longitude)
-        let distances = locations.map { location in
-            center.distance(from: CLLocation(latitude: location.coordinate.latitude, longitude: location.coordinate.longitude))
-        }
-        
-        return distances.max() ?? 50.0
-    }
-    
-    private func calculateFrequencyScore() -> Double {
-        let photoCount = Double(locations.count)
-        return min(photoCount / 50.0, 1.0) // Normalize to 0-1 scale
-    }
-    
-    private func calculateTimeSpentScore() -> Double {
-        // Infer time spent based on photo density and time clustering
-        let timeSpan = timeSpanDays
-        let photoCount = Double(locations.count)
-        
-        // More photos in shorter time span suggests more time spent there
-        let density = photoCount / timeSpan
-        return min(density / 10.0, 1.0) // Normalize to 0-1 scale
-    }
 }
 
 // MARK: - PhotoLocationCluster Extensions
