@@ -628,7 +628,11 @@ final class ForYouRecommendationLoader: ObservableObject {
                 let response = try await BackendClient.shared.searchPlaces(request)
                 let favIDs = Set(favorites.map { $0.placeId })
                 let filtered = response.results.filter { result in
-                    let pid = "\(result.name)_\(String(format: "%.5f", result.location.latitude))_\(String(format: "%.5f", result.location.longitude))"
+                    let coord = CLLocationCoordinate2D(
+                        latitude: result.location.latitude,
+                        longitude: result.location.longitude
+                    )
+                    let pid = FavoriteLocation.stablePlaceId(name: result.name, coordinate: coord)
                     return !favIDs.contains(pid)
                 }
                 self.recommendations = filtered.prefix(12).map { result in
