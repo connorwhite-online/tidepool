@@ -13,10 +13,8 @@ struct LocationDetail: Identifiable {
     let phoneNumber: String?
     let website: String?
     let hours: BusinessHours?
-    let images: [LocationImage]
     let rating: Double?
     let priceLevel: PriceLevel?
-    let amenities: [String]
     let userFavoriteStatus: FavoriteStatus
     
     enum PriceLevel: String, CaseIterable {
