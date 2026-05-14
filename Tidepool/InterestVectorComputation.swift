@@ -1,5 +1,6 @@
 import Foundation
 import CoreLocation
+import CryptoKit
 import SwiftUI
 import TidepoolShared
 
@@ -86,7 +87,14 @@ class InterestVectorManager: ObservableObject {
         uploadVectorToServer()
     }
 
-    /// Upload multi-vector payload to the backend.
+    /// Key under which the digest of the last successfully-uploaded payload
+    /// is stored. Bumping this format clears existing digests on app upgrade.
+    private static let uploadDigestKey = "interest_vector_last_upload_digest_v1"
+
+    /// Upload multi-vector payload to the backend. Skips the network round
+    /// trip if the payload is byte-identical to the last successful upload —
+    /// previously this fired on every ProfileView entry even when nothing
+    /// had changed.
     private func uploadVectorToServer() {
         guard !currentVector.isEmpty else { return }
 
@@ -104,20 +112,31 @@ class InterestVectorManager: ObservableObject {
         // Collect place POI frequencies from visit history + favorites
         let placePois = collectPlacePois()
 
+        let activeSources = getActiveDataSources()
         let multiRequest = MultiVectorRequest(
             musicGenres: musicGenres,
             placePois: placePois,
             vibeVector: currentVector,
             quality: qualityString,
-            activeSources: getActiveDataSources()
+            activeSources: activeSources
         )
+
+        // Skip if the payload matches the last successfully-uploaded one.
+        let digest = Self.uploadDigest(for: multiRequest)
+        let lastDigest = UserDefaults.standard.string(forKey: Self.uploadDigestKey)
+        if digest == lastDigest {
+            return
+        }
 
         pendingUploadTask?.cancel()
         let currentVectorSnapshot = currentVector
-        let activeSourcesSnapshot = getActiveDataSources()
+        let activeSourcesSnapshot = activeSources
         pendingUploadTask = Task {
             do {
                 let _ = try await BackendClient.shared.uploadMultiVector(multiRequest)
+                if !Task.isCancelled {
+                    UserDefaults.standard.set(digest, forKey: Self.uploadDigestKey)
+                }
                 print("[InterestVectorManager] Multi-vector uploaded (music: \(musicGenres.count) genres, places: \(placePois.count) POIs, vibe: \(currentVectorSnapshot.count) dims)")
             } catch is CancellationError {
                 return
@@ -133,6 +152,17 @@ class InterestVectorManager: ObservableObject {
                 print("[InterestVectorManager] Multi-vector failed, legacy fallback: \(error.localizedDescription)")
             }
         }
+    }
+
+    /// Stable fingerprint of a MultiVectorRequest. The Codable encoding is
+    /// deterministic enough for our purposes (sorted keys via the encoder
+    /// option), so we hash the JSON.
+    private static func uploadDigest(for request: MultiVectorRequest) -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        guard let data = try? encoder.encode(request) else { return UUID().uuidString }
+        let digest = SHA256.hash(data: data)
+        return digest.map { String(format: "%02x", $0) }.joined()
     }
 
     /// Collect raw genre strings with weights from Spotify + Apple Music (no mapper flattening).
