@@ -47,64 +47,37 @@ enum TidepoolComputeService {
 
         app.logger.info("[Tidepools] Computing for \(profiles.count) profiles...")
 
-        // Parse vectors once
-        let parsed = profiles.map { profile -> ParsedProfile in
-            ParsedProfile(
-                deviceID: profile.device_id,
-                interestVector: profile.interest_vector.flatMap { DeviceProfile.stringToVector($0) } ?? [],
-                musicVector: profile.music_vector.flatMap { DeviceProfile.stringToVector($0) } ?? [],
-                placesVector: profile.places_vector.flatMap { DeviceProfile.stringToVector($0) } ?? [],
-                vibeVector: profile.vibe_vector.flatMap { DeviceProfile.stringToVector($0) } ?? []
-            )
-        }
+        // Parse vectors and precompute magnitudes once per profile.
+        // Previously each magnitude was recomputed N times in the inner loop.
+        let parsed = profiles.map { PrecomputedProfile(profile: $0) }
 
-        // Pairwise comparison
-        var allMatches: [(deviceID: String, matchID: String, score: Float, places: Float, music: Float, vibe: Float)] = []
+        // Pairwise comparison — only i<j, since cosine is symmetric.
+        // Each match yields two directional rows (a→b and b→a) because the
+        // tidepools table stores per-viewer rows.
+        var matches: [Match] = []
+        matches.reserveCapacity(parsed.count * 4)
 
         for i in 0..<parsed.count {
-            for j in 0..<parsed.count {
-                guard i != j else { continue }
-
-                let a = parsed[i]
-                let b = parsed[j]
-
-                let (composite, placesSim, musicSim, vibeSim) = computeSimilarity(a: a, b: b)
-
-                if composite >= similarityThreshold {
-                    allMatches.append((
-                        deviceID: a.deviceID,
-                        matchID: b.deviceID,
-                        score: composite,
-                        places: placesSim,
-                        music: musicSim,
-                        vibe: vibeSim
-                    ))
-                }
+            for j in (i + 1)..<parsed.count {
+                let (composite, placesSim, musicSim, vibeSim) = computeSimilarity(a: parsed[i], b: parsed[j])
+                guard composite >= similarityThreshold else { continue }
+                matches.append(Match(deviceID: parsed[i].deviceID, matchID: parsed[j].deviceID,
+                                     score: composite, places: placesSim, music: musicSim, vibe: vibeSim))
+                matches.append(Match(deviceID: parsed[j].deviceID, matchID: parsed[i].deviceID,
+                                     score: composite, places: placesSim, music: musicSim, vibe: vibeSim))
             }
         }
 
-        app.logger.info("[Tidepools] Found \(allMatches.count) matches above threshold \(similarityThreshold)")
+        app.logger.info("[Tidepools] Found \(matches.count) matches above threshold \(similarityThreshold)")
 
-        // Batch upsert
-        let batchSize = 100
-        for batchStart in stride(from: 0, to: allMatches.count, by: batchSize) {
-            let batchEnd = min(batchStart + batchSize, allMatches.count)
-            let batch = allMatches[batchStart..<batchEnd]
-
-            for match in batch {
-                try? await sql.raw(SQLQueryString("""
-                    INSERT INTO tidepools (id, device_id, match_id, similarity_score, places_similarity, music_similarity, vibe_similarity, computed_at)
-                    VALUES (gen_random_uuid(), '\(unsafeRaw: match.deviceID)'::uuid, '\(unsafeRaw: match.matchID)'::uuid,
-                            \(unsafeRaw: String(match.score)), \(unsafeRaw: String(match.places)),
-                            \(unsafeRaw: String(match.music)), \(unsafeRaw: String(match.vibe)), now())
-                    ON CONFLICT (device_id, match_id) DO UPDATE SET
-                        similarity_score = \(unsafeRaw: String(match.score)),
-                        places_similarity = \(unsafeRaw: String(match.places)),
-                        music_similarity = \(unsafeRaw: String(match.music)),
-                        vibe_similarity = \(unsafeRaw: String(match.vibe)),
-                        computed_at = now()
-                    """)).run()
-            }
+        // Bulk upsert in chunks. Each chunk is one INSERT ... SELECT FROM unnest
+        // statement instead of one INSERT per match — at N users we went from
+        // O(N²) statements down to O(N²/chunkSize).
+        let chunkSize = 500
+        for chunkStart in stride(from: 0, to: matches.count, by: chunkSize) {
+            let chunkEnd = min(chunkStart + chunkSize, matches.count)
+            let chunk = Array(matches[chunkStart..<chunkEnd])
+            await upsertMatches(chunk, sql: sql, logger: app.logger)
         }
 
         // Clean up old matches that fell below threshold
@@ -119,7 +92,46 @@ enum TidepoolComputeService {
             """)).run()
 
         let elapsed = Date().timeIntervalSince(start)
-        app.logger.info("[Tidepools] Batch complete: \(allMatches.count) matches for \(profiles.count) users in \(String(format: "%.1f", elapsed))s")
+        app.logger.info("[Tidepools] Batch complete: \(matches.count) matches for \(profiles.count) users in \(String(format: "%.1f", elapsed))s")
+    }
+
+    private struct Match {
+        let deviceID: String
+        let matchID: String
+        let score: Float
+        let places: Float
+        let music: Float
+        let vibe: Float
+    }
+
+    /// Bulk upsert a chunk of matches as a single multi-row INSERT ... SELECT
+    /// driven by unnest arrays. ON CONFLICT updates similarity fields in place.
+    private static func upsertMatches(_ matches: [Match], sql: SQLDatabase, logger: Logger) async {
+        guard !matches.isEmpty else { return }
+        let deviceIDs = matches.map { $0.deviceID }
+        let matchIDs = matches.map { $0.matchID }
+        let scores = matches.map { $0.score }
+        let places = matches.map { $0.places }
+        let musics = matches.map { $0.music }
+        let vibes = matches.map { $0.vibe }
+        do {
+            try await sql.raw(SQLQueryString("""
+                INSERT INTO tidepools (id, device_id, match_id, similarity_score, places_similarity, music_similarity, vibe_similarity, computed_at)
+                SELECT gen_random_uuid(), did::uuid, mid::uuid, s, p, m, v, now()
+                FROM unnest(\(bind: deviceIDs)::text[], \(bind: matchIDs)::text[],
+                            \(bind: scores)::real[], \(bind: places)::real[],
+                            \(bind: musics)::real[], \(bind: vibes)::real[])
+                     AS t(did, mid, s, p, m, v)
+                ON CONFLICT (device_id, match_id) DO UPDATE SET
+                    similarity_score = EXCLUDED.similarity_score,
+                    places_similarity = EXCLUDED.places_similarity,
+                    music_similarity = EXCLUDED.music_similarity,
+                    vibe_similarity = EXCLUDED.vibe_similarity,
+                    computed_at = now()
+                """)).run()
+        } catch {
+            logger.error("[Tidepools] bulk upsert failed: \(error)")
+        }
     }
 
     // MARK: - Single User Recomputation
@@ -155,44 +167,36 @@ enum TidepoolComputeService {
 
         guard let others else { return }
 
-        let user = ParsedProfile(
-            deviceID: userProfile.device_id,
-            interestVector: userProfile.interest_vector.flatMap { DeviceProfile.stringToVector($0) } ?? [],
-            musicVector: userProfile.music_vector.flatMap { DeviceProfile.stringToVector($0) } ?? [],
-            placesVector: userProfile.places_vector.flatMap { DeviceProfile.stringToVector($0) } ?? [],
-            vibeVector: userProfile.vibe_vector.flatMap { DeviceProfile.stringToVector($0) } ?? []
-        )
+        let user = PrecomputedProfile(profile: userProfile)
+        let otherProfiles = others.map { PrecomputedProfile(profile: $0) }
 
-        for other in others {
-            let b = ParsedProfile(
-                deviceID: other.device_id,
-                interestVector: other.interest_vector.flatMap { DeviceProfile.stringToVector($0) } ?? [],
-                musicVector: other.music_vector.flatMap { DeviceProfile.stringToVector($0) } ?? [],
-                placesVector: other.places_vector.flatMap { DeviceProfile.stringToVector($0) } ?? [],
-                vibeVector: other.vibe_vector.flatMap { DeviceProfile.stringToVector($0) } ?? []
-            )
+        var matches: [Match] = []
+        matches.reserveCapacity(otherProfiles.count * 2)
+        var below: [String] = []
 
+        for b in otherProfiles {
             let (composite, placesSim, musicSim, vibeSim) = computeSimilarity(a: user, b: b)
-
             if composite >= similarityThreshold {
-                try? await sql.raw(SQLQueryString("""
-                    INSERT INTO tidepools (id, device_id, match_id, similarity_score, places_similarity, music_similarity, vibe_similarity, computed_at)
-                    VALUES (gen_random_uuid(), '\(unsafeRaw: user.deviceID)'::uuid, '\(unsafeRaw: b.deviceID)'::uuid,
-                            \(unsafeRaw: String(composite)), \(unsafeRaw: String(placesSim)),
-                            \(unsafeRaw: String(musicSim)), \(unsafeRaw: String(vibeSim)), now())
-                    ON CONFLICT (device_id, match_id) DO UPDATE SET
-                        similarity_score = \(unsafeRaw: String(composite)),
-                        places_similarity = \(unsafeRaw: String(placesSim)),
-                        music_similarity = \(unsafeRaw: String(musicSim)),
-                        vibe_similarity = \(unsafeRaw: String(vibeSim)),
-                        computed_at = now()
-                    """)).run()
+                // Both directions, as in computeAll
+                matches.append(Match(deviceID: user.deviceID, matchID: b.deviceID,
+                                     score: composite, places: placesSim, music: musicSim, vibe: vibeSim))
+                matches.append(Match(deviceID: b.deviceID, matchID: user.deviceID,
+                                     score: composite, places: placesSim, music: musicSim, vibe: vibeSim))
             } else {
-                // Remove if below threshold
-                try? await sql.raw(SQLQueryString("""
-                    DELETE FROM tidepools WHERE device_id = '\(unsafeRaw: user.deviceID)'::uuid AND match_id = '\(unsafeRaw: b.deviceID)'::uuid
-                    """)).run()
+                below.append(b.deviceID)
             }
+        }
+
+        await upsertMatches(matches, sql: sql, logger: app.logger)
+
+        // Bulk-delete the now-below-threshold pairs in one statement instead
+        // of one DELETE per other user.
+        if !below.isEmpty {
+            try? await sql.raw(SQLQueryString("""
+                DELETE FROM tidepools
+                WHERE (device_id = '\(unsafeRaw: deviceID)'::uuid AND match_id = ANY(\(bind: below)::uuid[]))
+                   OR (match_id = '\(unsafeRaw: deviceID)'::uuid AND device_id = ANY(\(bind: below)::uuid[]))
+                """)).run()
         }
 
         try? await sql.raw(SQLQueryString("""
@@ -200,15 +204,15 @@ enum TidepoolComputeService {
             WHERE device_id = '\(unsafeRaw: deviceID)'::uuid
             """)).run()
 
-        app.logger.info("[Tidepools] Recomputed for user \(deviceID)")
+        app.logger.info("[Tidepools] Recomputed for user \(deviceID): \(matches.count / 2) matches, \(below.count) below threshold")
     }
 
     // MARK: - Similarity Math
 
-    private static func computeSimilarity(a: ParsedProfile, b: ParsedProfile) -> (composite: Float, places: Float, music: Float, vibe: Float) {
-        let placesSim = cosineSimilarity(a.placesVector, b.placesVector)
-        let musicSim = cosineSimilarity(a.musicVector, b.musicVector)
-        let vibeSim = cosineSimilarity(a.vibeVector, b.vibeVector)
+    private static func computeSimilarity(a: PrecomputedProfile, b: PrecomputedProfile) -> (composite: Float, places: Float, music: Float, vibe: Float) {
+        let placesSim = cosineSimilarity(a.placesVector, b.placesVector, magA: a.placesMag, magB: b.placesMag)
+        let musicSim = cosineSimilarity(a.musicVector, b.musicVector, magA: a.musicMag, magB: b.musicMag)
+        let vibeSim = cosineSimilarity(a.vibeVector, b.vibeVector, magA: a.vibeMag, magB: b.vibeMag)
 
         // If multi-vectors exist, use weighted composite
         let hasMulti = !a.placesVector.isEmpty && !b.placesVector.isEmpty
@@ -217,19 +221,25 @@ enum TidepoolComputeService {
             composite = placesWeight * placesSim + musicWeight * musicSim + vibeWeight * vibeSim
         } else {
             // Fall back to single interest vector
-            composite = cosineSimilarity(a.interestVector, b.interestVector)
+            composite = cosineSimilarity(a.interestVector, b.interestVector, magA: a.interestMag, magB: b.interestMag)
         }
 
         return (composite, placesSim, musicSim, vibeSim)
     }
 
-    private static func cosineSimilarity(_ a: [Float], _ b: [Float]) -> Float {
-        guard a.count == b.count, !a.isEmpty else { return 0 }
-        let dot = zip(a, b).reduce(Float(0)) { $0 + $1.0 * $1.1 }
-        let magA = sqrt(a.reduce(Float(0)) { $0 + $1 * $1 })
-        let magB = sqrt(b.reduce(Float(0)) { $0 + $1 * $1 })
-        guard magA > 0, magB > 0 else { return 0 }
+    /// Cosine similarity with caller-supplied magnitudes so the same vector's
+    /// magnitude isn't recomputed N times across the outer loop.
+    private static func cosineSimilarity(_ a: [Float], _ b: [Float], magA: Float, magB: Float) -> Float {
+        guard a.count == b.count, !a.isEmpty, magA > 0, magB > 0 else { return 0 }
+        var dot: Float = 0
+        for i in 0..<a.count { dot += a[i] * b[i] }
         return dot / (magA * magB)
+    }
+
+    private static func magnitude(_ v: [Float]) -> Float {
+        var sum: Float = 0
+        for x in v { sum += x * x }
+        return sqrt(sum)
     }
 
     // MARK: - Data Models
@@ -243,11 +253,27 @@ enum TidepoolComputeService {
         let quality: String
     }
 
-    private struct ParsedProfile {
+    private struct PrecomputedProfile {
         let deviceID: String
         let interestVector: [Float]
         let musicVector: [Float]
         let placesVector: [Float]
         let vibeVector: [Float]
+        let interestMag: Float
+        let musicMag: Float
+        let placesMag: Float
+        let vibeMag: Float
+
+        init(profile: ProfileVectors) {
+            self.deviceID = profile.device_id
+            self.interestVector = profile.interest_vector.flatMap { DeviceProfile.stringToVector($0) } ?? []
+            self.musicVector = profile.music_vector.flatMap { DeviceProfile.stringToVector($0) } ?? []
+            self.placesVector = profile.places_vector.flatMap { DeviceProfile.stringToVector($0) } ?? []
+            self.vibeVector = profile.vibe_vector.flatMap { DeviceProfile.stringToVector($0) } ?? []
+            self.interestMag = TidepoolComputeService.magnitude(self.interestVector)
+            self.musicMag = TidepoolComputeService.magnitude(self.musicVector)
+            self.placesMag = TidepoolComputeService.magnitude(self.placesVector)
+            self.vibeMag = TidepoolComputeService.magnitude(self.vibeVector)
+        }
     }
 }
