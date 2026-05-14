@@ -181,9 +181,6 @@ struct ContentView: View {
                 category: category,
                 coordinate: coordinate,
                 address: mapItem.placemark.title,
-                phoneNumber: mapItem.phoneNumber,
-                website: nil,
-                hours: nil,
                 rating: nil,
                 priceLevel: nil,
                 userFavoriteStatus: favoriteStatus
@@ -211,9 +208,6 @@ struct ContentView: View {
                 category: favorite.category,
                 coordinate: favorite.coordinate,
                 address: nil,
-                phoneNumber: nil,
-                website: nil,
-                hours: nil,
                 rating: favorite.rating.map { Double($0) },
                 priceLevel: nil,
                 userFavoriteStatus: favoriteStatus

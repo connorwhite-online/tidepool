@@ -10,9 +10,6 @@ struct LocationDetail: Identifiable {
     let category: PlaceCategory
     let coordinate: CLLocationCoordinate2D
     let address: String?
-    let phoneNumber: String?
-    let website: String?
-    let hours: BusinessHours?
     let rating: Double?
     let priceLevel: PriceLevel?
     let userFavoriteStatus: FavoriteStatus
