@@ -134,32 +134,38 @@ class PhotosIntegrationManager: ObservableObject {
         let distinctDays: Int
     }
 
+    /// Cell coordinate keyed by integer grid position. Using a struct
+    /// instead of an interpolated "x_y" string avoids a String allocation
+    /// per photo in the quantize loop and per neighbor in the flood-fill —
+    /// on a 5000-photo library that's tens of thousands of allocations.
+    private struct Cell: Hashable {
+        let x: Int
+        let y: Int
+    }
+
     /// Build frequency grid, find cells with enough photos, flood-fill merge adjacent cells.
     private nonisolated func findHotspots(_ photos: [PhotoLocation], metersPerCell: Double, minPhotos: Int) -> [Hotspot] {
         let latMeters = 111_000.0
 
         // Quantize photos to grid cells
-        var cellPhotos: [String: [PhotoLocation]] = [:]
-        var cellXY: [String: (Int, Int)] = [:]
+        var cellPhotos: [Cell: [PhotoLocation]] = [:]
 
         for photo in photos {
             let lonMeters = latMeters * cos(photo.coordinate.latitude * .pi / 180)
             let x = Int(floor(photo.coordinate.longitude * lonMeters / metersPerCell))
             let y = Int(floor(photo.coordinate.latitude * latMeters / metersPerCell))
-            let key = "\(x)_\(y)"
-            cellPhotos[key, default: []].append(photo)
-            cellXY[key] = (x, y)
+            cellPhotos[Cell(x: x, y: y), default: []].append(photo)
         }
 
         // Find hot cells (minPhotos threshold)
         let hotKeys = Set(cellPhotos.filter { $0.value.count >= minPhotos }.keys)
 
         // Flood-fill merge adjacent hot cells
-        var visited = Set<String>()
+        var visited = Set<Cell>()
         var hotspots: [Hotspot] = []
 
         for key in hotKeys where !visited.contains(key) {
-            var queue = [key]
+            var queue: [Cell] = [key]
             var groupPhotos: [PhotoLocation] = []
 
             while !queue.isEmpty {
@@ -168,14 +174,12 @@ class PhotosIntegrationManager: ObservableObject {
                 visited.insert(current)
                 groupPhotos.append(contentsOf: cellPhotos[current] ?? [])
 
-                if let (x, y) = cellXY[current] {
-                    for dx in -1...1 {
-                        for dy in -1...1 {
-                            if dx == 0 && dy == 0 { continue }
-                            let nk = "\(x + dx)_\(y + dy)"
-                            if hotKeys.contains(nk) && !visited.contains(nk) {
-                                queue.append(nk)
-                            }
+                for dx in -1...1 {
+                    for dy in -1...1 {
+                        if dx == 0 && dy == 0 { continue }
+                        let nk = Cell(x: current.x + dx, y: current.y + dy)
+                        if hotKeys.contains(nk) && !visited.contains(nk) {
+                            queue.append(nk)
                         }
                     }
                 }
