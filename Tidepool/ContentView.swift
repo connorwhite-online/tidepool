@@ -261,14 +261,18 @@ struct MapSearchSheet: View {
 
     private let categorySearchRadius: CLLocationDistance = 4828
 
-    /// Favorites sorted by proximity to user's current location
+    /// Favorites sorted by proximity to user's current location.
+    /// Distance is computed once per favorite (not twice per comparison) by
+    /// projecting into (favorite, distance) tuples before sorting.
     private var nearbyFavorites: [FavoriteLocation] {
         let userLoc = CLLocation(latitude: userLocation.latitude, longitude: userLocation.longitude)
-        return favoritesManager.favorites.sorted { a, b in
-            let distA = CLLocation(latitude: a.coordinate.latitude, longitude: a.coordinate.longitude).distance(from: userLoc)
-            let distB = CLLocation(latitude: b.coordinate.latitude, longitude: b.coordinate.longitude).distance(from: userLoc)
-            return distA < distB
-        }
+        return favoritesManager.favorites
+            .map { fav -> (FavoriteLocation, CLLocationDistance) in
+                let loc = CLLocation(latitude: fav.coordinate.latitude, longitude: fav.coordinate.longitude)
+                return (fav, loc.distance(from: userLoc))
+            }
+            .sorted { $0.1 < $1.1 }
+            .map { $0.0 }
     }
 
     private var isActivelySearching: Bool {

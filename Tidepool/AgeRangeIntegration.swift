@@ -40,16 +40,6 @@ class AgeRangeManager: ObservableObject {
         return "\(age) years old"
     }
 
-    var canAccessAlcoholVenues: Bool {
-        guard let age = age else { return false }
-        return age >= 21
-    }
-
-    var canAccessAdultVenues: Bool {
-        guard let age = age else { return false }
-        return age >= 18
-    }
-
     // MARK: - Public Methods
 
     func setBirthday(_ date: Date) {
@@ -95,37 +85,6 @@ class AgeRangeManager: ObservableObject {
         }
 
         return tags
-    }
-
-    // MARK: - Venue Filtering
-
-    func shouldShowVenue(withTags tags: [String]) -> Bool {
-        let adultOnlyTags = ["bar", "nightclub", "wine_bar", "brewery", "cocktail_lounge"]
-        let hasAdultContent = tags.contains { adultOnlyTags.contains($0) }
-
-        if hasAdultContent && !canAccessAlcoholVenues {
-            return false
-        }
-
-        return true
-    }
-
-    func venueAgeWarning(forTags tags: [String]) -> String? {
-        let adultOnlyTags = ["bar", "nightclub", "wine_bar", "brewery", "cocktail_lounge"]
-        let hasAdultContent = tags.contains { adultOnlyTags.contains($0) }
-
-        if hasAdultContent {
-            switch ageRange {
-            case .under18:
-                return "This venue may be 21+ only"
-            case .eighteenTo20:
-                return "This venue may require ID (21+)"
-            case .twentyOnePlus, .unknown:
-                return nil
-            }
-        }
-
-        return nil
     }
 
     // MARK: - Private Methods
