@@ -1,4 +1,4 @@
-import CryptoKit
+import Crypto
 import Vapor
 import Fluent
 import SQLKit
@@ -37,7 +37,6 @@ struct MyListsController: RouteCollection {
             throw Abort(.internalServerError, reason: "SQL database required")
         }
 
-        let deviceIDStr = payload.deviceID.uuidString
         let signals = try await loadSignals(deviceID: payload.deviceID, sql: sql, db: req.db)
 
         let response = MyListsEngine.compile(
