@@ -33,6 +33,7 @@ struct ProfileView: View {
     @State private var showingAddHiddenPlace = false
     @State private var showingInsights = false
     @State private var showingCheckInsList = false
+    @State private var showingMyLists = false
     @State private var initialCheckInDetail: CheckInItem? = nil
     @State private var activeIntegrationMenu: ActiveIntegrationMenu? = nil
     @AppStorage("home_address") private var homeAddress: String = ""
@@ -75,6 +76,7 @@ struct ProfileView: View {
         ScrollView {
             VStack(spacing: 20) {
                 integrationsCard
+                myListsCard
                 visitsCard
                 locationCard
                 privacyCard
@@ -158,6 +160,19 @@ struct ProfileView: View {
         }
 
         loadVisitData()
+        refreshMyLists()
+    }
+
+    private func refreshMyLists() {
+        let coord = location.latestLocation?.coordinate
+            ?? location.homeLocation
+            ?? CLLocationCoordinate2D(latitude: 34.0522, longitude: -118.2437)
+        MyListsManager.shared.refresh(
+            near: coord,
+            radiusMiles: 10,
+            favorites: favoritesManager.favorites,
+            pendingVisits: VisitDetector.shared.pendingVisits
+        )
     }
 
     private func loadVisitData() {
@@ -886,6 +901,45 @@ struct ProfileView: View {
         .background(.regularMaterial)
         .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
         .shadow(color: .purple.opacity(0.08), radius: 12, y: 4)
+    }
+
+    private var myListsCard: some View {
+        VStack(spacing: 12) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("My Lists")
+                        .font(.title3)
+                        .fontWeight(.bold)
+                    Text("Auto-ranked from your visits")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 20)
+
+            MyListsProfileCard(listsManager: MyListsManager.shared) {
+                showingMyLists = true
+            }
+
+            Spacer().frame(height: 8)
+        }
+        .background(.regularMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .shadow(color: .orange.opacity(0.08), radius: 12, y: 4)
+        .sheet(isPresented: $showingMyLists) {
+            let coord = location.latestLocation?.coordinate
+                ?? location.homeLocation
+                ?? CLLocationCoordinate2D(latitude: 34.0522, longitude: -118.2437)
+            MyListsSheet(
+                listsManager: MyListsManager.shared,
+                userLocation: coord,
+                onSelectPlace: { _ in
+                    // Place detail from profile lists could open check-in sheet later.
+                }
+            )
+        }
     }
 
     private var visitsCard: some View {

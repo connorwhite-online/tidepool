@@ -227,6 +227,7 @@ struct MapSearchSheet: View {
 
     @StateObject private var searchCompleter = PlaceSearchCompleter()
     @StateObject private var forYouLoader = ForYouRecommendationLoader()
+    @StateObject private var myListsManager = MyListsManager.shared
     @ObservedObject private var locationManager = LocationManager.shared
     @State private var searchText = ""
     @State private var searchResults: [MKMapItem] = []
@@ -364,9 +365,27 @@ struct MapSearchSheet: View {
                 }
                 .listStyle(.plain)
             } else if !isActivelySearching {
-                // Default: Favorite Places + For You carousels
+                // Default: My Lists + Favorite Places + For You carousels
                 ScrollView {
                     VStack(alignment: .leading, spacing: 24) {
+                        if !myListsManager.lists.isEmpty || myListsManager.isLoading {
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text("My Lists")
+                                    .font(.subheadline)
+                                    .fontWeight(.semibold)
+                                    .foregroundStyle(.secondary)
+                                    .padding(.horizontal, 16)
+
+                                MyListsCarouselSection(
+                                    listsManager: myListsManager,
+                                    userLocation: userLocation,
+                                    onSelectPlace: { place in
+                                        onSelectMyListPlace(place)
+                                    }
+                                )
+                            }
+                        }
+
                         // Favorite Places
                         if !nearbyFavorites.isEmpty {
                             VStack(alignment: .leading, spacing: 10) {
@@ -432,7 +451,8 @@ struct MapSearchSheet: View {
                         }
 
                         // Subtle empty nudge
-                        if nearbyFavorites.isEmpty && forYouLoader.recommendations.isEmpty && !forYouLoader.isLoading {
+                        if nearbyFavorites.isEmpty && forYouLoader.recommendations.isEmpty
+                            && !forYouLoader.isLoading && myListsManager.lists.isEmpty && !myListsManager.isLoading {
                             VStack(spacing: 8) {
                                 Image(systemName: "mappin.and.ellipse")
                                     .font(.largeTitle)
@@ -474,6 +494,12 @@ struct MapSearchSheet: View {
                 favorites: favoritesManager.favorites,
                 near: mapCenter
             )
+            myListsManager.refresh(
+                near: userLocation,
+                radiusMiles: 10,
+                favorites: favoritesManager.favorites,
+                pendingVisits: VisitDetector.shared.pendingVisits
+            )
         }
         .onChange(of: searchText) { _, newValue in
             if suppressNextSearchChange {
@@ -486,6 +512,27 @@ struct MapSearchSheet: View {
     }
 
     // MARK: - Search Actions
+
+    private func onSelectMyListPlace(_ place: MyListPlace) {
+        let coord = CLLocationCoordinate2D(latitude: place.latitude, longitude: place.longitude)
+        let iosCategory = PlaceCategory(rawValue: place.category.rawValue) ?? .other
+        let favorite = favoritesManager.getFavorite(for: place.placeId)
+
+        let favoriteStatus: LocationDetail.FavoriteStatus
+        if let fav = favorite {
+            favoriteStatus = .favorited(rating: fav.rating ?? 0, notes: fav.notes)
+        } else {
+            favoriteStatus = .notFavorited
+        }
+
+        onSelectFavorite(FavoriteLocation(
+            placeId: place.placeId,
+            name: place.name,
+            category: iosCategory,
+            coordinate: coord,
+            rating: favorite?.rating
+        ))
+    }
 
     private func performSearch() {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
