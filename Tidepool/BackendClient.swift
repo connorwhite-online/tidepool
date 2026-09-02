@@ -165,6 +165,13 @@ class BackendClient: ObservableObject {
         try await request(method: "POST", path: "/v1/recommendations", body: body)
     }
 
+    // MARK: - My Lists
+
+    func getMyLists(lat: Double, lng: Double, radiusMiles: Double = 10) async throws -> MyListsResponse {
+        let query = "lat=\(lat)&lng=\(lng)&radius_miles=\(radiusMiles)"
+        return try await request(method: "GET", path: "/v1/lists?\(query)")
+    }
+
     // MARK: - Multi-Vector Profile
 
     func uploadMultiVector(_ body: MultiVectorRequest) async throws -> ProfileVectorResponse {
